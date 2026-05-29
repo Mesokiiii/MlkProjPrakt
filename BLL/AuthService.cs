@@ -1,32 +1,72 @@
-using Microsoft.VisualBasic.ApplicationServices;
+using System;
 
 public class AuthService
 {
-    
-    public static bool Login(string login, string userTextPassword)
+    private readonly DbManager db;
+    private int failedAttempts = 0;
+    private DateTime? lockoutEndTime = null;
+
+    public AuthService(DbManager db)
     {
+        this.db = db;
+    }
+
+    public bool Login(string login, string userTextPassword)
+    {
+        if (lockoutEndTime.HasValue)
+        {
+            if (DateTime.Now < lockoutEndTime.Value)
+            {
+                int remainingMinutes = (int)(lockoutEndTime.Value - DateTime.Now).TotalMinutes;
+
+                if (remainingMinutes <= 0)
+                {
+                    remainingMinutes = 1;
+                }
+
+                throw new Exception($"Превышено количество попыток входа. Система заблокирована. Попробуйте через {remainingMinutes} минут.");
+            }
+            else
+            {
+                // Время блокировки истекло, сбрасываем счетчики
+                failedAttempts = 0;
+                lockoutEndTime = null;
+            }
+        }
+
         string hashedPassword = PasswordHasher.Hash(userTextPassword);
-        string role = DbContext.Instance.ValidateUser(login, hashedPassword);
+        string role = db.ValidateUser(login, hashedPassword);
 
         if (role != null)
         {
+            failedAttempts = 0;
+
             UserSession.CurrentRole = role;
             UserSession.CurrentUserName = login;
             return true;
         }
-        return false;
+        else
+        {
+            failedAttempts++;
+
+            if (failedAttempts >= 3)
+            {
+                lockoutEndTime = DateTime.Now.AddMinutes(30);
+                throw new Exception("Слишком много попыток. повторите через 30 минут");
+            }
+            return false;
+        }
     }
 
-    public static bool Register(string login, string password, string role)
+    public bool Register(string login, string password, string role)
     {
         string hashedPassword = PasswordHasher.Hash(password);
 
-        return DbContext.Instance.CreateUser(login, hashedPassword, role);
-
+        return db.CreateUser(login, hashedPassword, role);
     }
-    public static void LogOut()
+
+    public void LogOut()
     {
         UserSession.Logout();
-        
     }
 }

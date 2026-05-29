@@ -11,5 +11,4 @@ public static class UserSession
         CurrentRole = null;
 
     }
-    
 }

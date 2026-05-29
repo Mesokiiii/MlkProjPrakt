@@ -1,0 +1,1519 @@
+// ===== Program.cs =====
+using System.Configuration;
+using Mb.UI.Login;
+using Mb.UI.Register;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Mb;
+
+static class Program
+{
+    /// <summary>
+    ///  The main entry point for the application.
+    /// </summary>
+    [STAThread]
+    static void Main()
+    {
+        // To customize application configuration such as set high DPI settings or default font,
+        // see https://aka.ms/applicationconfiguration.
+        ApplicationConfiguration.Initialize();
+
+        var services = new ServiceCollection();
+        ConfigureServices(services);
+
+        using var provider = services.BuildServiceProvider();
+        Application.Run(provider.GetRequiredService<MainMenu>());
+    }
+
+    static void ConfigureServices(ServiceCollection services)
+    {
+        string connectionString = ConfigurationManager.ConnectionStrings["HospitalDB"].ConnectionString;
+
+        services.AddSingleton(new DbManager(connectionString));
+        services.AddSingleton(new DataRepository(connectionString));
+        
+        services.AddSingleton<DataService>();
+        services.AddSingleton<AuthService>();
+        services.AddSingleton<MainMenu>();
+
+        services.AddTransient<RegisterForm>();
+        services.AddTransient<LoginForm>();
+    }
+}
+
+
+// ===== BLL\AuthService.cs =====
+using System;
+
+public class AuthService
+{
+    private readonly DbManager db;
+    private int failedAttempts = 0;
+    private DateTime? lockoutEndTime = null;
+
+    public AuthService(DbManager db)
+    {
+        this.db = db;
+    }
+
+    public bool Login(string login, string userTextPassword)
+    {
+        if (lockoutEndTime.HasValue)
+        {
+            if (DateTime.Now < lockoutEndTime.Value)
+            {
+                int remainingMinutes = (int)(lockoutEndTime.Value - DateTime.Now).TotalMinutes;
+
+                if (remainingMinutes <= 0)
+                {
+                    remainingMinutes = 1;
+                }
+
+                throw new Exception($"Превышено количество попыток входа. Система заблокирована. Попробуйте через {remainingMinutes} минут.");
+            }
+            else
+            {
+                // Время блокировки истекло, сбрасываем счетчики
+                failedAttempts = 0;
+                lockoutEndTime = null;
+            }
+        }
+
+        string hashedPassword = PasswordHasher.Hash(userTextPassword);
+        string role = db.ValidateUser(login, hashedPassword);
+
+        if (role != null)
+        {
+            failedAttempts = 0;
+
+            UserSession.CurrentRole = role;
+            UserSession.CurrentUserName = login;
+            return true;
+        }
+        else
+        {
+            failedAttempts++;
+
+            if (failedAttempts >= 3)
+            {
+                lockoutEndTime = DateTime.Now.AddMinutes(30);
+                throw new Exception("Слишком много попыток. повторите через 30 минут");
+            }
+            return false;
+        }
+    }
+
+    public bool Register(string login, string password, string role)
+    {
+        string hashedPassword = PasswordHasher.Hash(password);
+
+        return db.CreateUser(login, hashedPassword, role);
+    }
+
+    public void LogOut()
+    {
+        UserSession.Logout();
+    }
+}
+
+
+// ===== BLL\DataService.cs =====
+using System.Data;
+
+public class DataService
+{
+    private readonly DataRepository repository;
+
+    public DataService(DataRepository repository)
+    {
+        this.repository = repository;
+    }
+
+    public DataTable GetTable(string tableName)
+    {
+        try
+        {
+            return repository.GetDataTable(tableName);
+        } catch (Exception ex)
+        {
+            throw new Exception($"Ошибка при получении данных таблицч: {ex.Message}", ex);
+        }
+    }
+
+    public bool DataRecord(string tableName, int id)
+    {
+        
+        if (UserSession.CurrentRole == "Гость")
+        {
+            throw new Exception("У вас нет прав для удаления записей. Обратитесь к администратору.");
+        }
+
+        try
+        {
+            return repository.DeleteRecord(tableName, id);
+        } 
+        catch (Exception ex)
+        {
+            throw new Exception($"Ошибка бизнес-логики при удалении записи: {ex.Message}");
+        }
+    }
+}
+
+// ===== BLL\UserSession.cs =====
+public static class UserSession
+{
+    public static string CurrentUserName { get; set; }
+    public static string CurrentRole { get; set; }
+
+    public static bool IsLoggedIn => !string.IsNullOrEmpty(CurrentUserName);
+
+    public static void Logout()
+    {
+        CurrentUserName = null;
+        CurrentRole = null;
+
+    }
+}
+
+// ===== BLL\secure\PasswordHasher.cs =====
+using System.Security.Cryptography;
+using System.Text;
+
+public static class PasswordHasher
+{
+    public static string Hash(string userTextPassword)
+    {
+        using (SHA256 sha265 = SHA256.Create())
+        {
+            byte[] bytes = sha265.ComputeHash(Encoding.UTF8.GetBytes(userTextPassword));
+
+            StringBuilder stringBuilder = new StringBuilder();
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                stringBuilder.Append(bytes[i].ToString("x2"));
+            }
+            return stringBuilder.ToString();
+        }
+    }
+}
+
+// ===== DAL\DataRepository.cs =====
+using System;
+using System.Data;
+using System.Data.OleDb;
+using System.Collections.Generic;
+    public class DataRepository
+    {
+        private readonly string connectionString;
+
+        public DataRepository(string connectionString)
+        {
+            this.connectionString = connectionString;
+        }
+
+        // чтение
+        public DataTable GetDataTable(string tableName)
+        {
+            DataTable dataTable = new DataTable();
+
+            string query = $"SELECT * FROM [{tableName}]";
+
+            using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+            {
+                using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+                {
+                    using (OleDbDataAdapter adapter = new OleDbDataAdapter(oleDbCommand))
+                    {
+                        try
+                        {
+                            adapter.Fill(dataTable);
+                        }
+                        catch (Exception ex)
+                        {
+                            throw new Exception($"Не удалось загрузить таблицу {tableName}: {ex.Message}", ex);
+                        }
+                    }
+                }
+            }
+            return dataTable;
+        }
+
+        // ==
+        public bool DeleteRecord(string tableName, int recordId)
+        {
+            string query = $"DELETE FROM [{tableName}] WHERE [ID] = ?";
+            
+            var parameters = new Dictionary<string, object>
+            {
+                { "id", recordId }
+            };
+
+            return ExecuteNonQuery(query, parameters);
+        }
+        
+
+        // =====
+        private bool ExecuteNonQuery(string query, Dictionary<string, object> parameters = null)
+        {
+            using (OleDbConnection connection = new OleDbConnection(connectionString))
+            {
+                using (OleDbCommand command = new OleDbCommand(query, connection))
+                {
+                    if (parameters != null)
+                    {
+                        foreach (var param in parameters)
+                        {
+                            command.Parameters.AddWithValue("?", param.Value ?? DBNull.Value);
+                        }
+                    }
+
+                    try
+                    {
+                        connection.Open();
+                        int rowsAffected = command.ExecuteNonQuery();
+                        return rowsAffected > 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Exception($"Ошибка при записи в БД: {ex.Message}", ex);
+                    }
+                }
+            }
+        }
+
+    }
+
+// ===== DAL\DbManager.cs =====
+using System.Configuration;
+using System.Data.OleDb;
+using System.Linq.Expressions; 
+using System.IO;
+
+public class DbManager
+{
+    private readonly string connectionString;
+
+    public DbManager(string connectionString)
+    {
+        this.connectionString = connectionString;
+    }
+    
+    // public bool TestConnection()
+    // {
+    //     using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+    //     {
+    //         try
+    //         {
+    //             oleDbConnection.Open();
+    //             return true;
+    //         } catch (Exception)
+    //         {
+    //             return false;
+    //         }
+    //     } 
+    // }
+    private string GetSqlQuery(string fileName)
+    {
+        string sqlFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DAL", "Queries");
+        string fullPath = Path.Combine(sqlFolderPath, fileName);
+
+        if (!File.Exists(fullPath))
+        {
+            throw new FileNotFoundException($"Файл запроса не найден. Проверьте наличие файла {fullPath}");
+        }
+
+        return File.ReadAllText(fullPath);
+    }
+
+    public string ValidateUser(string login, string password)
+    {
+        string query = GetSqlQuery("ValidateUser.sql");
+
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        {
+        
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+            {
+                oleDbCommand.Parameters.AddWithValue("?", login);
+                oleDbCommand.Parameters.AddWithValue("?", password);
+
+                try
+                {
+                    oleDbConnection.Open();
+                    object result = oleDbCommand.ExecuteScalar();
+                    if (result != null)
+                    {
+                        return result.ToString();
+
+                    }
+
+                } catch (Exception ex)
+                {
+                    throw new Exception("Ошибка при получении пользователя" + ex.Message);
+
+                }
+            }
+        } return null;
+    }
+
+    public bool CreateUser(string login, string hashedPassword, string role)
+    {
+        string query = GetSqlQuery("CreateUser.sql");
+
+          using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        {
+        
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+            {
+                oleDbCommand.Parameters.AddWithValue("?", login);
+                oleDbCommand.Parameters.AddWithValue("?", hashedPassword);
+                oleDbCommand.Parameters.AddWithValue("?", role);
+
+                try
+                {
+                    oleDbConnection.Open();
+                    int rowsAffected = oleDbCommand.ExecuteNonQuery();
+                
+                   // Если добавлена хотя бы 1 строка, значит регистрация успешна
+                   return rowsAffected > 0; 
+                }
+                catch (Exception ex)
+                                       {
+                // Сохраняем оригинальный StackTrace через inner exception
+                throw new Exception("Ошибка при создании нового пользователя", ex);
+                                       }
+            }
+        }
+    }
+}
+
+// ===== DAL\Queries\CreateUser.sql =====
+INSERT INTO Users (Login, Password, Role) 
+VALUES (?, ?, ?);
+
+// ===== DAL\Queries\ValidateUser.sql =====
+SELECT Роль 
+FROM Пользователи 
+WHERE Логин = ? AND Пароль = ?
+
+// ===== Models\User.cs =====
+public class User
+{
+    public int ID { get; set; }
+    public string Login { get; set; }
+    public string Role { get; set; }
+}
+
+// ===== UI\MainMenu.Designer.cs =====
+﻿namespace Mb;
+
+partial class MainMenu
+{
+    /// <summary>
+    ///  Required designer variable.
+    /// </summary>
+    private System.ComponentModel.IContainer components = null;
+
+    /// <summary>
+    ///  Clean up any resources being used.
+    /// </summary>
+    /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && (components != null))
+        {
+            components.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    #region Windows Form Designer generated code
+
+    /// <summary>
+    ///  Required method for Designer support - do not modify
+    ///  the contents of this method with the code editor.
+    /// </summary>
+    private void InitializeComponent()
+    {
+        lblWelcome = new Label();
+        lblSubtitle = new Label();
+        pnlDatabase = new Panel();
+        lblDatabaseDesc = new Label();
+        lblDatabaseTitle = new Label();
+        pnlProfile = new Panel();
+        lblProfileDesc = new Label();
+        lblProfileTitle = new Label();
+        pnlReports = new Panel();
+        lblReportsDesc = new Label();
+        lblReportsTitle = new Label();
+        pnlAbout = new Panel();
+        lblAboutDesc = new Label();
+        lblAboutTitle = new Label();
+        btnExit = new Button();
+        pnlDatabase.SuspendLayout();
+        pnlProfile.SuspendLayout();
+        pnlReports.SuspendLayout();
+        pnlAbout.SuspendLayout();
+        SuspendLayout();
+        // 
+        // lblWelcome
+        // 
+        lblWelcome.Anchor = AnchorStyles.None;
+        lblWelcome.Font = new Font("Segoe UI Light", 30F);
+        lblWelcome.ForeColor = Color.FromArgb(74, 85, 104);
+        lblWelcome.Location = new Point(0, 60);
+        lblWelcome.Name = "lblWelcome";
+        lblWelcome.Size = new Size(824, 55);
+        lblWelcome.TabIndex = 0;
+        lblWelcome.Text = "Добро пожаловать";
+        lblWelcome.TextAlign = ContentAlignment.MiddleCenter;
+        // 
+        // lblSubtitle
+        // 
+        lblSubtitle.Anchor = AnchorStyles.None;
+        lblSubtitle.Font = new Font("Segoe UI", 11.25F, FontStyle.Italic);
+        lblSubtitle.ForeColor = Color.FromArgb(150, 158, 172);
+        lblSubtitle.Location = new Point(0, 120);
+        lblSubtitle.Name = "lblSubtitle";
+        lblSubtitle.Size = new Size(824, 25);
+        lblSubtitle.TabIndex = 1;
+        lblSubtitle.Text = "Выберите раздел для работы";
+        lblSubtitle.TextAlign = ContentAlignment.MiddleCenter;
+        // 
+        // pnlDatabase
+        // 
+        pnlDatabase.Anchor = AnchorStyles.None;
+        pnlDatabase.BackColor = Color.FromArgb(46, 74, 107);
+        pnlDatabase.Controls.Add(lblDatabaseDesc);
+        pnlDatabase.Controls.Add(lblDatabaseTitle);
+        pnlDatabase.Cursor = Cursors.Hand;
+        pnlDatabase.Location = new Point(64, 164);
+        pnlDatabase.Name = "pnlDatabase";
+        pnlDatabase.Size = new Size(340, 120);
+        pnlDatabase.TabIndex = 2;
+        pnlDatabase.Click += pnlDatabase_Click;
+        // 
+        // lblDatabaseDesc
+        // 
+        lblDatabaseDesc.AutoSize = true;
+        lblDatabaseDesc.Cursor = Cursors.Hand;
+        lblDatabaseDesc.Font = new Font("Segoe UI", 9.75F);
+        lblDatabaseDesc.ForeColor = Color.FromArgb(174, 185, 204);
+        lblDatabaseDesc.Location = new Point(18, 46);
+        lblDatabaseDesc.MaximumSize = new Size(308, 0);
+        lblDatabaseDesc.Name = "lblDatabaseDesc";
+        lblDatabaseDesc.Size = new Size(301, 69);
+        lblDatabaseDesc.TabIndex = 1;
+        lblDatabaseDesc.Text = "Управление справочниками: врачи, больницы и отделения. Поиск и редактирование.";
+        lblDatabaseDesc.Click += pnlDatabase_Click;
+        // 
+        // lblDatabaseTitle
+        // 
+        lblDatabaseTitle.AutoSize = true;
+        lblDatabaseTitle.Cursor = Cursors.Hand;
+        lblDatabaseTitle.Font = new Font("Segoe UI", 13.75F, FontStyle.Bold);
+        lblDatabaseTitle.ForeColor = Color.White;
+        lblDatabaseTitle.Location = new Point(16, 14);
+        lblDatabaseTitle.Name = "lblDatabaseTitle";
+        lblDatabaseTitle.Size = new Size(156, 31);
+        lblDatabaseTitle.TabIndex = 0;
+        lblDatabaseTitle.Text = "База данных";
+        lblDatabaseTitle.Click += pnlDatabase_Click;
+        // 
+        // pnlProfile
+        // 
+        pnlProfile.Anchor = AnchorStyles.None;
+        pnlProfile.BackColor = Color.FromArgb(244, 246, 250);
+        pnlProfile.Controls.Add(lblProfileDesc);
+        pnlProfile.Controls.Add(lblProfileTitle);
+        pnlProfile.Location = new Point(420, 164);
+        pnlProfile.Name = "pnlProfile";
+        pnlProfile.Size = new Size(340, 120);
+        pnlProfile.TabIndex = 3;
+        // 
+        // lblProfileDesc
+        // 
+        lblProfileDesc.AutoSize = true;
+        lblProfileDesc.Font = new Font("Segoe UI", 9.75F);
+        lblProfileDesc.ForeColor = Color.FromArgb(138, 148, 166);
+        lblProfileDesc.Location = new Point(18, 46);
+        lblProfileDesc.MaximumSize = new Size(308, 0);
+        lblProfileDesc.Name = "lblProfileDesc";
+        lblProfileDesc.Size = new Size(307, 46);
+        lblProfileDesc.TabIndex = 1;
+        lblProfileDesc.Text = "Вход в систему, управление учётной записью и персональными данными.";
+        // 
+        // lblProfileTitle
+        // 
+        lblProfileTitle.AutoSize = true;
+        lblProfileTitle.Font = new Font("Segoe UI", 13.75F, FontStyle.Bold);
+        lblProfileTitle.ForeColor = Color.FromArgb(44, 62, 80);
+        lblProfileTitle.Location = new Point(16, 14);
+        lblProfileTitle.Name = "lblProfileTitle";
+        lblProfileTitle.Size = new Size(201, 31);
+        lblProfileTitle.TabIndex = 0;
+        lblProfileTitle.Text = "Личный кабинет";
+        // 
+        // pnlReports
+        // 
+        pnlReports.Anchor = AnchorStyles.None;
+        pnlReports.BackColor = Color.FromArgb(244, 246, 250);
+        pnlReports.Controls.Add(lblReportsDesc);
+        pnlReports.Controls.Add(lblReportsTitle);
+        pnlReports.Location = new Point(64, 300);
+        pnlReports.Name = "pnlReports";
+        pnlReports.Size = new Size(340, 104);
+        pnlReports.TabIndex = 4;
+        // 
+        // lblReportsDesc
+        // 
+        lblReportsDesc.AutoSize = true;
+        lblReportsDesc.Font = new Font("Segoe UI", 9.75F);
+        lblReportsDesc.ForeColor = Color.FromArgb(138, 148, 166);
+        lblReportsDesc.Location = new Point(18, 46);
+        lblReportsDesc.MaximumSize = new Size(308, 0);
+        lblReportsDesc.Name = "lblReportsDesc";
+        lblReportsDesc.Size = new Size(238, 46);
+        lblReportsDesc.TabIndex = 1;
+        lblReportsDesc.Text = "Сводная статистика по всем разделам системы.";
+        // 
+        // lblReportsTitle
+        // 
+        lblReportsTitle.AutoSize = true;
+        lblReportsTitle.Font = new Font("Segoe UI", 13.75F, FontStyle.Bold);
+        lblReportsTitle.ForeColor = Color.FromArgb(44, 62, 80);
+        lblReportsTitle.Location = new Point(16, 14);
+        lblReportsTitle.Name = "lblReportsTitle";
+        lblReportsTitle.Size = new Size(96, 31);
+        lblReportsTitle.TabIndex = 0;
+        lblReportsTitle.Text = "Отчёты";
+        // 
+        // pnlAbout
+        // 
+        pnlAbout.Anchor = AnchorStyles.None;
+        pnlAbout.BackColor = Color.FromArgb(244, 246, 250);
+        pnlAbout.Controls.Add(lblAboutDesc);
+        pnlAbout.Controls.Add(lblAboutTitle);
+        pnlAbout.Location = new Point(420, 300);
+        pnlAbout.Name = "pnlAbout";
+        pnlAbout.Size = new Size(340, 104);
+        pnlAbout.TabIndex = 5;
+        // 
+        // lblAboutDesc
+        // 
+        lblAboutDesc.AutoSize = true;
+        lblAboutDesc.Font = new Font("Segoe UI", 9.75F);
+        lblAboutDesc.ForeColor = Color.FromArgb(138, 148, 166);
+        lblAboutDesc.Location = new Point(18, 46);
+        lblAboutDesc.MaximumSize = new Size(308, 0);
+        lblAboutDesc.Name = "lblAboutDesc";
+        lblAboutDesc.Size = new Size(302, 46);
+        lblAboutDesc.TabIndex = 1;
+        lblAboutDesc.Text = "Информация о версии, технологиях и разработчиках.";
+        // 
+        // lblAboutTitle
+        // 
+        lblAboutTitle.AutoSize = true;
+        lblAboutTitle.Font = new Font("Segoe UI", 13.75F, FontStyle.Bold);
+        lblAboutTitle.ForeColor = Color.FromArgb(44, 62, 80);
+        lblAboutTitle.Location = new Point(16, 14);
+        lblAboutTitle.Name = "lblAboutTitle";
+        lblAboutTitle.Size = new Size(162, 31);
+        lblAboutTitle.TabIndex = 0;
+        lblAboutTitle.Text = "О программе";
+        // 
+        // btnExit
+        // 
+        btnExit.Anchor = AnchorStyles.None;
+        btnExit.BackColor = Color.White;
+        btnExit.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+        btnExit.FlatStyle = FlatStyle.Flat;
+        btnExit.Font = new Font("Segoe UI", 9.75F);
+        btnExit.ForeColor = Color.FromArgb(108, 117, 125);
+        btnExit.Location = new Point(280, 444);
+        btnExit.Name = "btnExit";
+        btnExit.Size = new Size(253, 38);
+        btnExit.TabIndex = 6;
+        btnExit.Text = "Выйти из программы";
+        btnExit.UseVisualStyleBackColor = false;
+        btnExit.Click += btnExit_Click;
+        // 
+        // MainMenu
+        // 
+        AutoScaleDimensions = new SizeF(8F, 20F);
+        AutoScaleMode = AutoScaleMode.Font;
+        BackColor = Color.White;
+        ClientSize = new Size(824, 560);
+        Controls.Add(btnExit);
+        Controls.Add(pnlAbout);
+        Controls.Add(pnlReports);
+        Controls.Add(pnlProfile);
+        Controls.Add(pnlDatabase);
+        Controls.Add(lblSubtitle);
+        Controls.Add(lblWelcome);
+        MinimumSize = new Size(840, 599);
+        Name = "MainMenu";
+        StartPosition = FormStartPosition.CenterScreen;
+        Text = "Главное меню";
+        WindowState = FormWindowState.Maximized;
+        pnlDatabase.ResumeLayout(false);
+        pnlDatabase.PerformLayout();
+        pnlProfile.ResumeLayout(false);
+        pnlProfile.PerformLayout();
+        pnlReports.ResumeLayout(false);
+        pnlReports.PerformLayout();
+        pnlAbout.ResumeLayout(false);
+        pnlAbout.PerformLayout();
+        ResumeLayout(false);
+    }
+
+    #endregion
+
+    private Label lblWelcome;
+    private Label lblSubtitle;
+    private Panel pnlDatabase;
+    private Label lblDatabaseTitle;
+    private Label lblDatabaseDesc;
+    private Panel pnlProfile;
+    private Label lblProfileTitle;
+    private Label lblProfileDesc;
+    private Panel pnlReports;
+    private Label lblReportsTitle;
+    private Label lblReportsDesc;
+    private Panel pnlAbout;
+    private Label lblAboutTitle;
+    private Label lblAboutDesc;
+    private Button btnExit;
+}
+
+
+// ===== UI\MainMenu.cs =====
+using Mb.UI.Login;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Mb;
+
+public partial class MainMenu : Form
+{
+    private readonly IServiceProvider services;
+
+    public MainMenu(IServiceProvider services)
+    {
+        this.services = services;
+        InitializeComponent();
+    }
+
+    private void pnlDatabase_Click(object sender, EventArgs e)
+    {
+        LoginForm loginForm = services.GetRequiredService<LoginForm>();
+        if (!UserSession.IsLoggedIn)
+        {
+            MessageBox.Show("Для доступа необходимо войти в систему", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+            loginForm = services.GetRequiredService<LoginForm>();
+
+            if (loginForm.ShowDialog() == DialogResult.OK)
+            {
+                OpenDataBaseForm();
+                
+            }
+        }
+        loginForm.Show();
+    }
+
+    private void OpenDataBaseForm()
+    {
+        
+    }
+    private void btnExit_Click(object sender, EventArgs e)
+    {
+        Application.Exit();
+    }
+}
+
+
+// ===== UI\About\AboutForm.Designer.cs =====
+﻿namespace Mb.UI.About
+{
+    partial class AboutForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            this.components = new System.ComponentModel.Container();
+            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+            this.ClientSize = new System.Drawing.Size(800, 450);
+            this.Text = "AboutForm";
+        }
+
+        #endregion
+    }
+}
+
+// ===== UI\About\AboutForm.cs =====
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace Mb.UI.About
+{
+    public partial class AboutForm : Form
+    {
+        public AboutForm()
+        {
+            InitializeComponent();
+        }
+    }
+}
+
+
+// ===== UI\Login\LoginForm.Designer.cs =====
+﻿namespace Mb.UI.Login
+{
+    partial class LoginForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            pnlCard = new Panel();
+            lnkRegister = new LinkLabel();
+            btnLogin = new Button();
+            txtPassword = new TextBox();
+            lblPassword = new Label();
+            txtLogin = new TextBox();
+            lblLogin = new Label();
+            lblSubtitle = new Label();
+            lblTitle = new Label();
+            pnlCard.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlCard
+            // 
+            pnlCard.Anchor = AnchorStyles.None;
+            pnlCard.BackColor = Color.White;
+            pnlCard.BorderStyle = BorderStyle.FixedSingle;
+            pnlCard.Controls.Add(lnkRegister);
+            pnlCard.Controls.Add(btnLogin);
+            pnlCard.Controls.Add(txtPassword);
+            pnlCard.Controls.Add(lblPassword);
+            pnlCard.Controls.Add(txtLogin);
+            pnlCard.Controls.Add(lblLogin);
+            pnlCard.Controls.Add(lblSubtitle);
+            pnlCard.Controls.Add(lblTitle);
+            pnlCard.Location = new Point(30, 45);
+            pnlCard.Name = "pnlCard";
+            pnlCard.Size = new Size(360, 420);
+            pnlCard.TabIndex = 0;
+            // 
+            // lnkRegister
+            // 
+            lnkRegister.ActiveLinkColor = Color.FromArgb(33, 53, 77);
+            lnkRegister.Font = new Font("Segoe UI", 9.75F);
+            lnkRegister.LinkArea = new LinkArea(14, 18);
+            lnkRegister.LinkColor = Color.FromArgb(46, 74, 107);
+            lnkRegister.Location = new Point(18, 360);
+            lnkRegister.Name = "lnkRegister";
+            lnkRegister.Size = new Size(322, 24);
+            lnkRegister.TabIndex = 7;
+            lnkRegister.TabStop = true;
+            lnkRegister.Text = "Нет аккаунта? Зарегистрироваться";
+            lnkRegister.TextAlign = ContentAlignment.MiddleCenter;
+            lnkRegister.UseCompatibleTextRendering = true;
+            lnkRegister.LinkClicked += lnkRegister_LinkClicked;
+            // 
+            // btnLogin
+            // 
+            btnLogin.BackColor = Color.FromArgb(46, 74, 107);
+            btnLogin.Cursor = Cursors.Hand;
+            btnLogin.FlatAppearance.BorderSize = 0;
+            btnLogin.FlatStyle = FlatStyle.Flat;
+            btnLogin.Font = new Font("Segoe UI", 11.25F);
+            btnLogin.ForeColor = Color.White;
+            btnLogin.Location = new Point(36, 296);
+            btnLogin.Name = "btnLogin";
+            btnLogin.Size = new Size(288, 44);
+            btnLogin.TabIndex = 6;
+            btnLogin.Text = "Войти";
+            btnLogin.UseVisualStyleBackColor = false;
+            btnLogin.Click += btnLogin_Click;
+            // 
+            // txtPassword
+            // 
+            txtPassword.BorderStyle = BorderStyle.FixedSingle;
+            txtPassword.Font = new Font("Segoe UI", 11F);
+            txtPassword.Location = new Point(36, 230);
+            txtPassword.Name = "txtPassword";
+            txtPassword.PlaceholderText = "Введите пароль";
+            txtPassword.Size = new Size(288, 32);
+            txtPassword.TabIndex = 5;
+            txtPassword.UseSystemPasswordChar = true;
+            // 
+            // lblPassword
+            // 
+            lblPassword.AutoSize = true;
+            lblPassword.Font = new Font("Segoe UI", 9.75F);
+            lblPassword.ForeColor = Color.FromArgb(108, 117, 125);
+            lblPassword.Location = new Point(34, 206);
+            lblPassword.Name = "lblPassword";
+            lblPassword.Size = new Size(69, 23);
+            lblPassword.TabIndex = 4;
+            lblPassword.Text = "Пароль";
+            // 
+            // txtLogin
+            // 
+            txtLogin.BorderStyle = BorderStyle.FixedSingle;
+            txtLogin.Font = new Font("Segoe UI", 11F);
+            txtLogin.Location = new Point(36, 160);
+            txtLogin.Name = "txtLogin";
+            txtLogin.PlaceholderText = "Введите логин";
+            txtLogin.Size = new Size(288, 32);
+            txtLogin.TabIndex = 3;
+            // 
+            // lblLogin
+            // 
+            lblLogin.AutoSize = true;
+            lblLogin.Font = new Font("Segoe UI", 9.75F);
+            lblLogin.ForeColor = Color.FromArgb(108, 117, 125);
+            lblLogin.Location = new Point(34, 136);
+            lblLogin.Name = "lblLogin";
+            lblLogin.Size = new Size(58, 23);
+            lblLogin.TabIndex = 2;
+            lblLogin.Text = "Логин";
+            // 
+            // lblSubtitle
+            // 
+            lblSubtitle.Font = new Font("Segoe UI", 9.75F, FontStyle.Italic);
+            lblSubtitle.ForeColor = Color.FromArgb(150, 158, 172);
+            lblSubtitle.Location = new Point(18, 78);
+            lblSubtitle.Name = "lblSubtitle";
+            lblSubtitle.Size = new Size(322, 24);
+            lblSubtitle.TabIndex = 1;
+            lblSubtitle.Text = "Войдите в свою учётную запись";
+            lblSubtitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // lblTitle
+            // 
+            lblTitle.Font = new Font("Segoe UI Light", 22F);
+            lblTitle.ForeColor = Color.FromArgb(46, 74, 107);
+            lblTitle.Location = new Point(18, 32);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(322, 42);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "Авторизация";
+            lblTitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // LoginForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.FromArgb(244, 246, 250);
+            ClientSize = new Size(420, 510);
+            Controls.Add(pnlCard);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Name = "LoginForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            Text = "Авторизация";
+            pnlCard.ResumeLayout(false);
+            pnlCard.PerformLayout();
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlCard;
+        private Label lblTitle;
+        private Label lblSubtitle;
+        private Label lblLogin;
+        private TextBox txtLogin;
+        private Label lblPassword;
+        private TextBox txtPassword;
+        private Button btnLogin;
+        private LinkLabel lnkRegister;
+    }
+}
+
+
+// ===== UI\Login\LoginForm.cs =====
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Mb.UI.Register;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.VisualBasic;
+using Microsoft.VisualBasic.Logging;
+
+namespace Mb.UI.Login
+{
+    public partial class LoginForm : Form
+    {
+        private readonly AuthService authService;
+        private readonly IServiceProvider services;
+        public LoginForm(AuthService authService, IServiceProvider services)
+        {
+            this.authService = authService;
+            this.services = services;
+
+            InitializeComponent();
+        }
+
+        private void btnLogin_Click(object sender, EventArgs e)
+        {
+            string login = txtLogin.Text.Trim();
+            string password = txtPassword.Text.Trim();
+
+            if (string.IsNullOrEmpty(password) || string.IsNullOrEmpty(login))
+            {
+                MessageBox.Show("Пожалуйста, введите логин или пароль.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+
+                bool isSuccess = authService.Login(login, password);
+                if (isSuccess)
+                {
+                    this.DialogResult = DialogResult.OK;
+                    this.Close();
+
+                }
+                else
+                {
+                    MessageBox.Show("Неверный логин или пароль", "Ошибка авторизации", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Произошла ошибка при авторизации: {ex.Message}", "Критическая ошибка",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        private void lnkLogin_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+{
+    this.Close(); // Просто закрываем форму регистрации
+}
+
+       private void lnkRegister_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+{
+    RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
+
+    this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
+
+    registerForm.ShowDialog(); // Открываем регистрацию
+
+    this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
+}
+    }
+    
+}
+
+
+// ===== UI\Profile\ProfileForm.Designer.cs =====
+﻿namespace Mb.UI.Profile
+{
+    partial class ProfileForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            pnlCard = new Panel();
+            btnHome = new Button();
+            btnLogout = new Button();
+            btnChangePassword = new Button();
+            lblRoleValue = new Label();
+            lblRoleCaption = new Label();
+            lblEmailValue = new Label();
+            lblEmailCaption = new Label();
+            lblSubtitle = new Label();
+            lblTitle = new Label();
+            pnlCard.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlCard
+            // 
+            pnlCard.Anchor = AnchorStyles.None;
+            pnlCard.BackColor = Color.White;
+            pnlCard.BorderStyle = BorderStyle.FixedSingle;
+            pnlCard.Controls.Add(btnHome);
+            pnlCard.Controls.Add(btnLogout);
+            pnlCard.Controls.Add(btnChangePassword);
+            pnlCard.Controls.Add(lblRoleValue);
+            pnlCard.Controls.Add(lblRoleCaption);
+            pnlCard.Controls.Add(lblEmailValue);
+            pnlCard.Controls.Add(lblEmailCaption);
+            pnlCard.Controls.Add(lblSubtitle);
+            pnlCard.Controls.Add(lblTitle);
+            pnlCard.Location = new Point(412, 130);
+            pnlCard.Name = "pnlCard";
+            pnlCard.Size = new Size(460, 520);
+            pnlCard.TabIndex = 0;
+            // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderSize = 0;
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(46, 74, 107);
+            btnHome.Location = new Point(46, 466);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(368, 32);
+            btnHome.TabIndex = 8;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            // 
+            // btnLogout
+            // 
+            btnLogout.BackColor = Color.White;
+            btnLogout.Cursor = Cursors.Hand;
+            btnLogout.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnLogout.FlatStyle = FlatStyle.Flat;
+            btnLogout.Font = new Font("Segoe UI", 11.25F);
+            btnLogout.ForeColor = Color.FromArgb(108, 117, 125);
+            btnLogout.Location = new Point(46, 404);
+            btnLogout.Name = "btnLogout";
+            btnLogout.Size = new Size(368, 46);
+            btnLogout.TabIndex = 7;
+            btnLogout.Text = "Выйти из аккаунта";
+            btnLogout.UseVisualStyleBackColor = false;
+            // 
+            // btnChangePassword
+            // 
+            btnChangePassword.BackColor = Color.FromArgb(46, 74, 107);
+            btnChangePassword.Cursor = Cursors.Hand;
+            btnChangePassword.FlatAppearance.BorderSize = 0;
+            btnChangePassword.FlatStyle = FlatStyle.Flat;
+            btnChangePassword.Font = new Font("Segoe UI", 11.25F);
+            btnChangePassword.ForeColor = Color.White;
+            btnChangePassword.Location = new Point(46, 344);
+            btnChangePassword.Name = "btnChangePassword";
+            btnChangePassword.Size = new Size(368, 46);
+            btnChangePassword.TabIndex = 6;
+            btnChangePassword.Text = "Сменить пароль";
+            btnChangePassword.UseVisualStyleBackColor = false;
+            // 
+            // lblRoleValue
+            // 
+            lblRoleValue.Font = new Font("Segoe UI", 13F);
+            lblRoleValue.ForeColor = Color.FromArgb(44, 62, 80);
+            lblRoleValue.Location = new Point(44, 250);
+            lblRoleValue.Name = "lblRoleValue";
+            lblRoleValue.Size = new Size(372, 30);
+            lblRoleValue.TabIndex = 5;
+            lblRoleValue.Text = "—";
+            // 
+            // lblRoleCaption
+            // 
+            lblRoleCaption.AutoSize = true;
+            lblRoleCaption.Font = new Font("Segoe UI", 9.75F);
+            lblRoleCaption.ForeColor = Color.FromArgb(150, 158, 172);
+            lblRoleCaption.Location = new Point(44, 226);
+            lblRoleCaption.Name = "lblRoleCaption";
+            lblRoleCaption.Size = new Size(38, 20);
+            lblRoleCaption.TabIndex = 4;
+            lblRoleCaption.Text = "Роль";
+            // 
+            // lblEmailValue
+            // 
+            lblEmailValue.Font = new Font("Segoe UI", 13F);
+            lblEmailValue.ForeColor = Color.FromArgb(44, 62, 80);
+            lblEmailValue.Location = new Point(44, 166);
+            lblEmailValue.Name = "lblEmailValue";
+            lblEmailValue.Size = new Size(372, 30);
+            lblEmailValue.TabIndex = 3;
+            lblEmailValue.Text = "—";
+            // 
+            // lblEmailCaption
+            // 
+            lblEmailCaption.AutoSize = true;
+            lblEmailCaption.Font = new Font("Segoe UI", 9.75F);
+            lblEmailCaption.ForeColor = Color.FromArgb(150, 158, 172);
+            lblEmailCaption.Location = new Point(44, 142);
+            lblEmailCaption.Name = "lblEmailCaption";
+            lblEmailCaption.Size = new Size(46, 20);
+            lblEmailCaption.TabIndex = 2;
+            lblEmailCaption.Text = "Email";
+            // 
+            // lblSubtitle
+            // 
+            lblSubtitle.Font = new Font("Segoe UI", 9.75F, FontStyle.Italic);
+            lblSubtitle.ForeColor = Color.FromArgb(150, 158, 172);
+            lblSubtitle.Location = new Point(20, 80);
+            lblSubtitle.Name = "lblSubtitle";
+            lblSubtitle.Size = new Size(420, 24);
+            lblSubtitle.TabIndex = 1;
+            lblSubtitle.Text = "Информация о вашей учётной записи";
+            lblSubtitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // lblTitle
+            // 
+            lblTitle.Font = new Font("Segoe UI Light", 24F);
+            lblTitle.ForeColor = Color.FromArgb(46, 74, 107);
+            lblTitle.Location = new Point(20, 32);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(420, 44);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "Личный кабинет";
+            lblTitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // ProfileForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.FromArgb(244, 246, 250);
+            ClientSize = new Size(1284, 770);
+            Controls.Add(pnlCard);
+            MinimumSize = new Size(640, 620);
+            Name = "ProfileForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            WindowState = FormWindowState.Maximized;
+            Text = "Личный кабинет";
+            pnlCard.ResumeLayout(false);
+            pnlCard.PerformLayout();
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlCard;
+        private Label lblTitle;
+        private Label lblSubtitle;
+        private Label lblEmailCaption;
+        private Label lblEmailValue;
+        private Label lblRoleCaption;
+        private Label lblRoleValue;
+        private Button btnChangePassword;
+        private Button btnLogout;
+        private Button btnHome;
+    }
+}
+
+
+// ===== UI\Profile\ProfileForm.cs =====
+﻿namespace Mb.UI.Profile
+{
+    public partial class ProfileForm : Form
+    {
+        public ProfileForm()
+        {
+            InitializeComponent();
+        }
+    }
+}
+
+
+// ===== UI\Register\RegisterForm.Designer.cs =====
+﻿namespace Mb.UI.Register
+{
+    partial class RegisterForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            pnlCard = new Panel();
+            lnkLogin = new LinkLabel();
+            btnRegister = new Button();
+            txtConfirm = new TextBox();
+            lblConfirm = new Label();
+            txtPassword = new TextBox();
+            lblPassword = new Label();
+            txtEmail = new TextBox();
+            lblEmail = new Label();
+            lblSubtitle = new Label();
+            lblTitle = new Label();
+            pnlCard.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlCard
+            // 
+            pnlCard.Anchor = AnchorStyles.None;
+            pnlCard.BackColor = Color.White;
+            pnlCard.BorderStyle = BorderStyle.FixedSingle;
+            pnlCard.Controls.Add(lnkLogin);
+            pnlCard.Controls.Add(btnRegister);
+            pnlCard.Controls.Add(txtConfirm);
+            pnlCard.Controls.Add(lblConfirm);
+            pnlCard.Controls.Add(txtPassword);
+            pnlCard.Controls.Add(lblPassword);
+            pnlCard.Controls.Add(txtEmail);
+            pnlCard.Controls.Add(lblEmail);
+            pnlCard.Controls.Add(lblSubtitle);
+            pnlCard.Controls.Add(lblTitle);
+            pnlCard.Location = new Point(30, 45);
+            pnlCard.Name = "pnlCard";
+            pnlCard.Size = new Size(360, 500);
+            pnlCard.TabIndex = 0;
+            // 
+            // lnkLogin
+            // 
+            lnkLogin.ActiveLinkColor = Color.FromArgb(33, 53, 77);
+            lnkLogin.Font = new Font("Segoe UI", 9.75F);
+            lnkLogin.LinkArea = new LinkArea(17, 6);
+            lnkLogin.LinkColor = Color.FromArgb(46, 74, 107);
+            lnkLogin.Location = new Point(18, 440);
+            lnkLogin.Name = "lnkLogin";
+            lnkLogin.Size = new Size(322, 24);
+            lnkLogin.TabIndex = 9;
+            lnkLogin.TabStop = true;
+            lnkLogin.Text = "Уже есть аккаунт? Войти";
+            lnkLogin.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // btnRegister
+            // 
+            btnRegister.BackColor = Color.FromArgb(46, 74, 107);
+            btnRegister.Cursor = Cursors.Hand;
+            btnRegister.FlatAppearance.BorderSize = 0;
+            btnRegister.FlatStyle = FlatStyle.Flat;
+            btnRegister.Font = new Font("Segoe UI", 11.25F);
+            btnRegister.ForeColor = Color.White;
+            btnRegister.Location = new Point(36, 376);
+            btnRegister.Name = "btnRegister";
+            btnRegister.Size = new Size(288, 44);
+            btnRegister.TabIndex = 8;
+            btnRegister.Text = "Зарегистрироваться";
+            btnRegister.UseVisualStyleBackColor = false;
+            // 
+            // txtConfirm
+            // 
+            txtConfirm.BorderStyle = BorderStyle.FixedSingle;
+            txtConfirm.Font = new Font("Segoe UI", 11F);
+            txtConfirm.Location = new Point(36, 310);
+            txtConfirm.Name = "txtConfirm";
+            txtConfirm.PlaceholderText = "Повторите пароль";
+            txtConfirm.Size = new Size(288, 30);
+            txtConfirm.TabIndex = 7;
+            txtConfirm.UseSystemPasswordChar = true;
+            // 
+            // lblConfirm
+            // 
+            lblConfirm.AutoSize = true;
+            lblConfirm.Font = new Font("Segoe UI", 9.75F);
+            lblConfirm.ForeColor = Color.FromArgb(108, 117, 125);
+            lblConfirm.Location = new Point(34, 286);
+            lblConfirm.Name = "lblConfirm";
+            lblConfirm.Size = new Size(132, 20);
+            lblConfirm.TabIndex = 6;
+            lblConfirm.Text = "Подтвердите пароль";
+            // 
+            // txtPassword
+            // 
+            txtPassword.BorderStyle = BorderStyle.FixedSingle;
+            txtPassword.Font = new Font("Segoe UI", 11F);
+            txtPassword.Location = new Point(36, 240);
+            txtPassword.Name = "txtPassword";
+            txtPassword.PlaceholderText = "Введите пароль";
+            txtPassword.Size = new Size(288, 30);
+            txtPassword.TabIndex = 5;
+            txtPassword.UseSystemPasswordChar = true;
+            // 
+            // lblPassword
+            // 
+            lblPassword.AutoSize = true;
+            lblPassword.Font = new Font("Segoe UI", 9.75F);
+            lblPassword.ForeColor = Color.FromArgb(108, 117, 125);
+            lblPassword.Location = new Point(34, 216);
+            lblPassword.Name = "lblPassword";
+            lblPassword.Size = new Size(54, 20);
+            lblPassword.TabIndex = 4;
+            lblPassword.Text = "Пароль";
+            // 
+            // txtEmail
+            // 
+            txtEmail.BorderStyle = BorderStyle.FixedSingle;
+            txtEmail.Font = new Font("Segoe UI", 11F);
+            txtEmail.Location = new Point(36, 170);
+            txtEmail.Name = "txtEmail";
+            txtEmail.PlaceholderText = "Введите email";
+            txtEmail.Size = new Size(288, 30);
+            txtEmail.TabIndex = 3;
+            // 
+            // lblEmail
+            // 
+            lblEmail.AutoSize = true;
+            lblEmail.Font = new Font("Segoe UI", 9.75F);
+            lblEmail.ForeColor = Color.FromArgb(108, 117, 125);
+            lblEmail.Location = new Point(34, 146);
+            lblEmail.Name = "lblEmail";
+            lblEmail.Size = new Size(46, 20);
+            lblEmail.TabIndex = 2;
+            lblEmail.Text = "Email";
+            // 
+            // lblSubtitle
+            // 
+            lblSubtitle.Font = new Font("Segoe UI", 9.75F, FontStyle.Italic);
+            lblSubtitle.ForeColor = Color.FromArgb(150, 158, 172);
+            lblSubtitle.Location = new Point(18, 78);
+            lblSubtitle.Name = "lblSubtitle";
+            lblSubtitle.Size = new Size(322, 24);
+            lblSubtitle.TabIndex = 1;
+            lblSubtitle.Text = "Создайте новую учётную запись";
+            lblSubtitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // lblTitle
+            // 
+            lblTitle.Font = new Font("Segoe UI Light", 22F);
+            lblTitle.ForeColor = Color.FromArgb(46, 74, 107);
+            lblTitle.Location = new Point(18, 32);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(322, 42);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "Регистрация";
+            lblTitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // RegisterForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.FromArgb(244, 246, 250);
+            ClientSize = new Size(420, 590);
+            Controls.Add(pnlCard);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Name = "RegisterForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            Text = "Регистрация";
+            pnlCard.ResumeLayout(false);
+            pnlCard.PerformLayout();
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlCard;
+        private Label lblTitle;
+        private Label lblSubtitle;
+        private Label lblEmail;
+        private TextBox txtEmail;
+        private Label lblPassword;
+        private TextBox txtPassword;
+        private Label lblConfirm;
+        private TextBox txtConfirm;
+        private Button btnRegister;
+        private LinkLabel lnkLogin;
+    }
+}
+
+
+// ===== UI\Register\RegisterForm.cs =====
+﻿namespace Mb.UI.Register
+{
+    public partial class RegisterForm : Form
+    {
+        public RegisterForm()
+        {
+            InitializeComponent();
+        }
+    }
+}
+
+

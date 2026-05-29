@@ -8,14 +8,22 @@ using System.Linq.Expressions;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Mb.UI.Register;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualBasic;
+using Microsoft.VisualBasic.Logging;
 
 namespace Mb.UI.Login
 {
     public partial class LoginForm : Form
     {
-        public LoginForm()
+        private readonly AuthService authService;
+        private readonly IServiceProvider services;
+        public LoginForm(AuthService authService, IServiceProvider services)
         {
+            this.authService = authService;
+            this.services = services;
+
             InitializeComponent();
         }
 
@@ -29,26 +37,44 @@ namespace Mb.UI.Login
                 MessageBox.Show("Пожалуйста, введите логин или пароль.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            
+
             try
             {
 
-                bool isSuccess = AuthService.Login(login, password);
+                bool isSuccess = authService.Login(login, password);
                 if (isSuccess)
                 {
                     this.DialogResult = DialogResult.OK;
                     this.Close();
 
-                } else
+                }
+                else
                 {
                     MessageBox.Show("Неверный логин или пароль", "Ошибка авторизации", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
-                } 
-            }  catch (Exception ex)
+                }
+            }
+            catch (Exception ex)
             {
-                MessageBox.Show($"Произошла ошибка при авторизации: {ex.Message}", "Критическая ошибка", 
+                MessageBox.Show($"Произошла ошибка при авторизации: {ex.Message}", "Критическая ошибка",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private void lnkLogin_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+{
+    this.Close(); // Просто закрываем форму регистрации
+}
+
+       private void lnkRegister_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+{
+    RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
+
+    this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
+
+    registerForm.ShowDialog(); // Открываем регистрацию
+
+    this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
+}
     }
+    
 }
