@@ -24,23 +24,18 @@ namespace Mb.UI.Login
             string login = txtLogin.Text.Trim();
             string password = txtPassword.Text.Trim();
 
-            if (string.IsNullOrEmpty(password) && string.IsNullOrEmpty(login))
+            if (string.IsNullOrEmpty(password) || string.IsNullOrEmpty(login))
             {
                 MessageBox.Show("Пожалуйста, введите логин или пароль.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
-        
             }
             
             try
             {
-                
-                string role = DbContext.Instance.ValidateUser(login, password);
-                
-                if (role != null)
-                {
-                    UserSession.CurrentRole = role;
-                    UserSession.CurrentUserName = login;
 
+                bool isSuccess = AuthService.Login(login, password);
+                if (isSuccess)
+                {
                     this.DialogResult = DialogResult.OK;
                     this.Close();
 

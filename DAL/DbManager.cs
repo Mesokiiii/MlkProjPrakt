@@ -12,21 +12,20 @@ public class DbManager
         this.connectionString = connectionString;
     }
     
-    public bool TestConnection()
-    {
-        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
-        {
-            try
-            {
-                oleDbConnection.Open();
-                return true;
-            } catch (Exception)
-            {
-                return false;
-            }
-        } 
-    }
-
+    // public bool TestConnection()
+    // {
+    //     using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+    //     {
+    //         try
+    //         {
+    //             oleDbConnection.Open();
+    //             return true;
+    //         } catch (Exception)
+    //         {
+    //             return false;
+    //         }
+    //     } 
+    // }
     private string GetSqlQuery(string fileName)
     {
         string sqlFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DAL", "Queries");
@@ -34,7 +33,7 @@ public class DbManager
 
         if (!File.Exists(fullPath))
         {
-            throw new FileNotFoundException($"Скюл файл не найден. {fullPath}");
+            throw new FileNotFoundException($"Файл запроса не найден. Проверьте наличие файла {fullPath}");
         }
 
         return File.ReadAllText(fullPath);
@@ -69,5 +68,35 @@ public class DbManager
                 }
             }
         } return null;
+    }
+
+    public bool CreateUser(string login, string hashedPassword, string role)
+    {
+        string query = GetSqlQuery("CreateUser.sql");
+
+          using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        {
+        
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+            {
+                oleDbCommand.Parameters.AddWithValue("?", login);
+                oleDbCommand.Parameters.AddWithValue("?", hashedPassword);
+                oleDbCommand.Parameters.AddWithValue("?", role);
+
+                try
+                {
+                    oleDbConnection.Open();
+                    int rowsAffected = oleDbCommand.ExecuteNonQuery();
+                
+                   // Если добавлена хотя бы 1 строка, значит регистрация успешна
+                   return rowsAffected > 0; 
+                }
+                catch (Exception ex)
+                                       {
+                // Сохраняем оригинальный StackTrace через inner exception
+                throw new Exception("Ошибка при создании нового пользователя", ex);
+                                       }
+            }
+        }
     }
 }
