@@ -1,5 +1,6 @@
 // ===== Program.cs =====
 using System.Configuration;
+using Mb.UI.Database;
 using Mb.UI.Login;
 using Mb.UI.Register;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,6 +37,7 @@ static class Program
         services.AddSingleton<AuthService>();
         services.AddSingleton<MainMenu>();
 
+        services.AddTransient<DatabaseForm>();
         services.AddTransient<RegisterForm>();
         services.AddTransient<LoginForm>();
     }
@@ -140,21 +142,61 @@ public class DataService
         }
     }
 
+    private string GetPrimaryKeyName(string tableName)
+    {
+        switch (tableName)
+        {
+            case "Врачи":
+                return "Код_врача";
+            case "Больницы":
+                return "Номер_больницы";
+            case "Отделения":
+                return "Код_отделения";
+            case "Пользователи":
+                return "Код_пользователя";
+            default:
+                throw new Exception("Неизвестная таблица: " + tableName);
+        }
+    }
+
     public bool DataRecord(string tableName, int id)
     {
-        
         if (UserSession.CurrentRole == "Гость")
         {
-            throw new Exception("У вас нет прав для удаления записей. Обратитесь к администратору.");
+            throw new Exception("У вас нет прав для удаления записей.");
         }
-
+        
         try
         {
-            return repository.DeleteRecord(tableName, id);
+            string pkName = GetPrimaryKeyName(tableName);
+            return repository.DeleteRecord(tableName, pkName, id);
         } 
         catch (Exception ex)
         {
-            throw new Exception($"Ошибка бизнес-логики при удалении записи: {ex.Message}");
+            throw new Exception($"Ошибка при удалении: {ex.Message}");
+        }
+    }
+
+    public bool SaveRecord(string tableName, Dictionary<string, string> values, int? id = null)
+    {
+        if (UserSession.CurrentRole == "Гость")
+        {
+           throw new Exception("У вас нет прав для изменения данных.");
+        }
+
+        var data = values.ToDictionary(k => k.Key, v => (object)v.Value);
+
+        string pkName = GetPrimaryKeyName(tableName);
+
+        if(id.HasValue)
+        {
+            if (data.ContainsKey(pkName)) data.Remove(pkName); 
+            return repository.UpdateRecord(tableName, pkName, id.Value, data);
+        } else
+        {
+            if (data.ContainsKey(pkName)) data.Remove(pkName);
+            return repository.InsertRecord(tableName, data);
+
         }
     }
 }
@@ -239,9 +281,9 @@ using System.Collections.Generic;
         }
 
         // ==
-        public bool DeleteRecord(string tableName, int recordId)
+        public bool DeleteRecord(string tableName, string primaryKeyName, int recordId)
         {
-            string query = $"DELETE FROM [{tableName}] WHERE [ID] = ?";
+            string query = $"DELETE FROM [{tableName}] WHERE [{primaryKeyName}] = ?";
             
             var parameters = new Dictionary<string, object>
             {
@@ -250,9 +292,74 @@ using System.Collections.Generic;
 
             return ExecuteNonQuery(query, parameters);
         }
-        
 
-        // =====
+        // ==
+
+        public bool InsertRecord(string tableName, Dictionary<string, object> data)
+        {
+            string columns = "";
+            string values = "";
+            int count = 0;
+
+            foreach (var pair in data)
+            {
+                columns += "[" + pair.Key + "]";
+                values += "?";
+
+                if (count < data.Count - 1)
+                {
+                    columns += ", ";
+                    values += ", ";
+                }
+                
+                count++;
+            }
+
+            string query = "INSERT INTO [" + tableName + "] (" + columns + ") VALUES (" + values + ")";
+
+            return ExecuteNonQuery(query, data);
+        }
+
+        // == 
+        public bool UpdateRecord(string tableName, string pkName, int pkValue, Dictionary<string, object> data)
+        {
+    
+            string setClause = "";
+            int count = 0;
+
+            foreach (var key in data.Keys)
+            {
+                setClause += "[" + key + "] = ?";
+
+                // Если это не последний элемент, добавляем запятую
+                if (count < data.Count - 1)
+                {
+                    setClause += ", ";
+                }
+                count++;
+            }
+
+            // 2. Формируем SQL запрос через обычную склейку строк
+            string query = "UPDATE [" + tableName + "] SET " + setClause + " WHERE [" + pkName + "] = ?";
+
+            // 3. Готовим параметры. В SQL параметрах важен порядок.
+            // Сначала должны идти значения для SET, а в самом конце — значение для WHERE.
+            Dictionary<string, object> parameters = new Dictionary<string, object>();
+
+            // Копируем всё из data в новый словарь через цикл
+            foreach (var pair in data)
+            {
+                parameters.Add(pair.Key, pair.Value);
+            }
+
+            // Добавляем ID (первичный ключ) в самый конец
+            parameters.Add(pkName, pkValue);
+
+            // 4. Выполняем
+            return ExecuteNonQuery(query, parameters);
+        }
+
+        // ==
         private bool ExecuteNonQuery(string query, Dictionary<string, object> parameters = null)
         {
             using (OleDbConnection connection = new OleDbConnection(connectionString))
@@ -280,6 +387,9 @@ using System.Collections.Generic;
                 }
             }
         }
+
+        // ==
+
 
     }
 
@@ -388,7 +498,7 @@ public class DbManager
 }
 
 // ===== DAL\Queries\CreateUser.sql =====
-INSERT INTO Users (Login, Password, Role) 
+INSERT INTO Пользователи (Логин, Пароль, Роль) 
 VALUES (?, ?, ?);
 
 // ===== DAL\Queries\ValidateUser.sql =====
@@ -690,6 +800,7 @@ partial class MainMenu
 // ===== UI\MainMenu.cs =====
 using Mb.UI.Login;
 using Microsoft.Extensions.DependencyInjection;
+using Mb.UI.Database;
 
 namespace Mb;
 
@@ -702,28 +813,37 @@ public partial class MainMenu : Form
         this.services = services;
         InitializeComponent();
     }
-
     private void pnlDatabase_Click(object sender, EventArgs e)
     {
-        LoginForm loginForm = services.GetRequiredService<LoginForm>();
-        if (!UserSession.IsLoggedIn)
+        // 1. Проверяем: если пользователь УЖЕ вошел в систему
+        if (UserSession.IsLoggedIn)
         {
-            MessageBox.Show("Для доступа необходимо войти в систему", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-
-            loginForm = services.GetRequiredService<LoginForm>();
-
-            if (loginForm.ShowDialog() == DialogResult.OK)
-            {
-                OpenDataBaseForm();
-                
-            }
+            OpenDataBaseForm();
+            return; // Ключевое слово return сразу прерывает метод. Всё, что ниже, выполняться не будет!
         }
-        loginForm.Show();
+
+        // 2. Если пользователь НЕ вошел — показываем предупреждение
+        MessageBox.Show("Для доступа необходимо войти в систему.", 
+                        "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+        // Достаем форму логина
+        LoginForm loginForm = services.GetRequiredService<LoginForm>();
+
+        // Открываем её модально (ShowDialog)
+        if (loginForm.ShowDialog() == DialogResult.OK)
+        {
+            // Если вход успешный — открываем базу
+            OpenDataBaseForm();
+        }
     }
 
     private void OpenDataBaseForm()
     {
-        
+        DatabaseForm databaseForm = services.GetRequiredService<DatabaseForm>();
+
+        this.Hide();
+        databaseForm.ShowDialog();
+        this.Show();
     }
     private void btnExit_Click(object sender, EventArgs e)
     {
@@ -791,6 +911,627 @@ namespace Mb.UI.About
         public AboutForm()
         {
             InitializeComponent();
+        }
+    }
+}
+
+
+// ===== UI\Database\DatabaseForm.Designer.cs =====
+﻿namespace Mb.UI.Database
+{
+    partial class DatabaseForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            DataGridViewCellStyle dataGridViewCellStyle1 = new DataGridViewCellStyle();
+            pnlHeader = new Panel();
+            cmbTables = new ComboBox();
+            txtSearch = new TextBox();
+            lblTitle = new Label();
+            pnlContent = new Panel();
+            dgvData = new DataGridView();
+            pnlFooter = new Panel();
+            btnHome = new Button();
+            btnRefresh = new Button();
+            btnDelete = new Button();
+            btnEdit = new Button();
+            btnAdd = new Button();
+            pnlHeader.SuspendLayout();
+            pnlContent.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)dgvData).BeginInit();
+            pnlFooter.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlHeader
+            // 
+            pnlHeader.BackColor = Color.FromArgb(46, 74, 107);
+            pnlHeader.Controls.Add(cmbTables);
+            pnlHeader.Controls.Add(txtSearch);
+            pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Dock = DockStyle.Top;
+            pnlHeader.Location = new Point(0, 0);
+            pnlHeader.Name = "pnlHeader";
+            pnlHeader.Size = new Size(1284, 80);
+            pnlHeader.TabIndex = 0;
+            // 
+            // cmbTables
+            // 
+            cmbTables.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            cmbTables.BackColor = Color.White;
+            cmbTables.Cursor = Cursors.Hand;
+            cmbTables.DropDownStyle = ComboBoxStyle.DropDownList;
+            cmbTables.FlatStyle = FlatStyle.Flat;
+            cmbTables.Font = new Font("Segoe UI", 11F);
+            cmbTables.ForeColor = Color.FromArgb(44, 62, 80);
+            cmbTables.Items.AddRange(new object[] { "Врачи", "Больницы", "Отделения" });
+            cmbTables.Location = new Point(704, 25);
+            cmbTables.Name = "cmbTables";
+            cmbTables.Size = new Size(220, 33);
+            cmbTables.TabIndex = 2;
+            cmbTables.SelectedIndexChanged += cmbTables_SelectedIndexChanged;
+            // 
+            // txtSearch
+            // 
+            txtSearch.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            txtSearch.BorderStyle = BorderStyle.FixedSingle;
+            txtSearch.Font = new Font("Segoe UI", 11F);
+            txtSearch.Location = new Point(944, 24);
+            txtSearch.Name = "txtSearch";
+            txtSearch.PlaceholderText = "Поиск...";
+            txtSearch.Size = new Size(300, 32);
+            txtSearch.TabIndex = 3;
+            txtSearch.TextChanged += txtSearch_TextChanged;
+            // 
+            // lblTitle
+            // 
+            lblTitle.AutoSize = true;
+            lblTitle.Font = new Font("Segoe UI Light", 20F);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.Location = new Point(36, 20);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(206, 46);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "База данных";
+            // 
+            // pnlContent
+            // 
+            pnlContent.BackColor = Color.FromArgb(244, 246, 250);
+            pnlContent.Controls.Add(dgvData);
+            pnlContent.Dock = DockStyle.Fill;
+            pnlContent.Location = new Point(0, 80);
+            pnlContent.Name = "pnlContent";
+            pnlContent.Padding = new Padding(36, 24, 36, 24);
+            pnlContent.Size = new Size(1284, 610);
+            pnlContent.TabIndex = 1;
+            // 
+            // dgvData
+            // 
+            dgvData.AllowUserToAddRows = false;
+            dgvData.AllowUserToDeleteRows = false;
+            dgvData.BackgroundColor = Color.White;
+            dgvData.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            dgvData.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            dgvData.ColumnHeadersDefaultCellStyle = dataGridViewCellStyle1;
+            dgvData.ColumnHeadersHeight = 44;
+            dgvData.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            dgvData.Dock = DockStyle.Fill;
+            dgvData.EnableHeadersVisualStyles = false;
+            dgvData.GridColor = Color.FromArgb(233, 236, 239);
+            dgvData.Location = new Point(36, 24);
+            dgvData.Name = "dgvData";
+            dgvData.RowHeadersVisible = false;
+            dgvData.RowHeadersWidth = 51;
+            dgvData.RowTemplate.Height = 40;
+            dgvData.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvData.Size = new Size(1212, 562);
+            dgvData.TabIndex = 0;
+            dgvData.CellContentClick += dgvData_CellContentClick;
+            // 
+            // pnlFooter
+            // 
+            pnlFooter.BackColor = Color.White;
+            pnlFooter.Controls.Add(btnHome);
+            pnlFooter.Controls.Add(btnRefresh);
+            pnlFooter.Controls.Add(btnDelete);
+            pnlFooter.Controls.Add(btnEdit);
+            pnlFooter.Controls.Add(btnAdd);
+            pnlFooter.Dock = DockStyle.Bottom;
+            pnlFooter.Location = new Point(0, 690);
+            pnlFooter.Name = "pnlFooter";
+            pnlFooter.Padding = new Padding(36, 0, 36, 0);
+            pnlFooter.Size = new Size(1284, 80);
+            pnlFooter.TabIndex = 2;
+            // 
+            // btnHome
+            // 
+            btnHome.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 10.5F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(1104, 19);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(140, 42);
+            btnHome.TabIndex = 4;
+            btnHome.Text = "На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            // 
+            // btnRefresh
+            // 
+            btnRefresh.BackColor = Color.White;
+            btnRefresh.Cursor = Cursors.Hand;
+            btnRefresh.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnRefresh.FlatStyle = FlatStyle.Flat;
+            btnRefresh.Font = new Font("Segoe UI", 10.5F);
+            btnRefresh.ForeColor = Color.FromArgb(108, 117, 125);
+            btnRefresh.Location = new Point(471, 19);
+            btnRefresh.Name = "btnRefresh";
+            btnRefresh.Size = new Size(140, 42);
+            btnRefresh.TabIndex = 3;
+            btnRefresh.Text = "Обновить";
+            btnRefresh.UseVisualStyleBackColor = false;
+            // 
+            // btnDelete
+            // 
+            btnDelete.BackColor = Color.White;
+            btnDelete.Cursor = Cursors.Hand;
+            btnDelete.FlatAppearance.BorderColor = Color.FromArgb(220, 53, 69);
+            btnDelete.FlatStyle = FlatStyle.Flat;
+            btnDelete.Font = new Font("Segoe UI", 10.5F);
+            btnDelete.ForeColor = Color.FromArgb(220, 53, 69);
+            btnDelete.Location = new Point(321, 19);
+            btnDelete.Name = "btnDelete";
+            btnDelete.Size = new Size(140, 42);
+            btnDelete.TabIndex = 2;
+            btnDelete.Text = "Удалить";
+            btnDelete.UseVisualStyleBackColor = false;
+            btnDelete.Click += btnDelete_Click;
+            // 
+            // btnEdit
+            // 
+            btnEdit.BackColor = Color.White;
+            btnEdit.Cursor = Cursors.Hand;
+            btnEdit.FlatAppearance.BorderColor = Color.FromArgb(46, 74, 107);
+            btnEdit.FlatStyle = FlatStyle.Flat;
+            btnEdit.Font = new Font("Segoe UI", 10.5F);
+            btnEdit.ForeColor = Color.FromArgb(46, 74, 107);
+            btnEdit.Location = new Point(171, 19);
+            btnEdit.Name = "btnEdit";
+            btnEdit.Size = new Size(140, 42);
+            btnEdit.TabIndex = 1;
+            btnEdit.Text = "Редактировать";
+            btnEdit.UseVisualStyleBackColor = false;
+            btnEdit.Click += btnEdit_Click;
+            // 
+            // btnAdd
+            // 
+            btnAdd.BackColor = Color.FromArgb(46, 74, 107);
+            btnAdd.Cursor = Cursors.Hand;
+            btnAdd.FlatAppearance.BorderSize = 0;
+            btnAdd.FlatStyle = FlatStyle.Flat;
+            btnAdd.Font = new Font("Segoe UI", 10.5F);
+            btnAdd.ForeColor = Color.White;
+            btnAdd.Location = new Point(36, 19);
+            btnAdd.Name = "btnAdd";
+            btnAdd.Size = new Size(125, 42);
+            btnAdd.TabIndex = 0;
+            btnAdd.Text = "Добавить";
+            btnAdd.UseVisualStyleBackColor = false;
+            btnAdd.Click += btnAdd_Click;
+            // 
+            // DatabaseForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.White;
+            ClientSize = new Size(1284, 770);
+            Controls.Add(pnlContent);
+            Controls.Add(pnlFooter);
+            Controls.Add(pnlHeader);
+            MinimumSize = new Size(900, 560);
+            Name = "DatabaseForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            Text = "База данных";
+            WindowState = FormWindowState.Maximized;
+            pnlHeader.ResumeLayout(false);
+            pnlHeader.PerformLayout();
+            pnlContent.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)dgvData).EndInit();
+            pnlFooter.ResumeLayout(false);
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlHeader;
+        private Label lblTitle;
+        private TextBox txtSearch;
+        private ComboBox cmbTables;
+        private Panel pnlContent;
+        private DataGridView dgvData;
+        private Panel pnlFooter;
+        private Button btnAdd;
+        private Button btnEdit;
+        private Button btnDelete;
+        private Button btnRefresh;
+        private Button btnHome;
+    }
+}
+
+
+// ===== UI\Database\DatabaseForm.cs =====
+﻿using System;
+using System.Data;
+using System.Linq; // Для работы Cast и Select (лямбда-выражения)
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace Mb.UI.Database
+{
+    public partial class DatabaseForm : Form
+    {
+        private readonly DataService dataService;
+
+        public DatabaseForm(DataService dataService)
+        {
+            InitializeComponent();
+            this.dataService = dataService;
+
+            cmbTables.SelectedIndex = 0;
+        }
+
+        private void LoadData()
+        {
+
+            if (cmbTables.SelectedItem == null) return;
+            string tableName = cmbTables.SelectedItem.ToString();
+
+            try
+            {
+                DataTable table = dataService.GetTable(tableName);
+
+                dgvData.DataSource = table;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("ОШИБКА БАЗЫ: " + ex.Message);
+            }
+        }
+        private void cmbTables_SelectedIndexChanged(object sender, EventArgs e) => LoadData();
+
+        private void btnRefresh_Click(object sender, EventArgs e) => LoadData();
+
+        private void btnHome_Click(object sender, EventArgs e) => this.Close();
+
+        private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e)
+        {
+
+        }
+
+        private void btnDelete_Click(object sender, EventArgs e)
+        {
+            if (dgvData.CurrentRow != null)
+            {
+                try
+                {
+                    int id = Convert.ToInt32(dgvData.CurrentRow.Cells[0].Value);
+
+                    string tableName = cmbTables.SelectedItem.ToString();
+
+                    var result = MessageBox.Show($"Вы уверены, что хотите удалить запись с ID {id} из таблицы {tableName}?",
+                                         "Подтверждение", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+                    if (result == DialogResult.Yes)
+                    {
+                        bool isDeleted = dataService.DataRecord(tableName, id);
+
+                        if (isDeleted)
+                        {
+                            MessageBox.Show("Запись удалена!");
+                            LoadData();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            else
+            {
+                MessageBox.Show("Пожалуйста, заполните ячейку");
+            }
+        }
+
+        private void btnAdd_Click(object sender, EventArgs e)
+        {
+            string tableName = cmbTables.SelectedItem.ToString();
+
+            var fields = dgvData.Columns.Cast<DataGridViewColumn>()
+                .ToDictionary(c => c.Name, c => (string?)null);
+
+            var editForm = new EditRecordForm($"Добавление в {tableName}", fields);
+
+            if (editForm.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    dataService.SaveRecord(tableName, editForm.Values);
+                    LoadData();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+            }
+        }
+        private void btnEdit_Click(object sender, EventArgs e)
+        {
+            if (dgvData.CurrentRow == null)
+            {
+                return;
+            }
+
+            string tableName = cmbTables.SelectedItem.ToString();
+            int id = Convert.ToInt32(dgvData.CurrentRow.Cells[0].Value);
+
+            // Собираем данные из выбранной строки
+            var fields = dgvData.Columns.Cast<DataGridViewColumn>()
+                .ToDictionary(c => c.Name, c => dgvData.CurrentRow.Cells[c.Index].Value?.ToString());
+
+            var editForm = new EditRecordForm($"Редактирование {tableName}", fields);
+
+            if (editForm.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    dataService.SaveRecord(tableName, editForm.Values, id);
+                    LoadData();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+            }
+        }
+
+        private void txtSearch_TextChanged(object sender, EventArgs e)
+        {
+            if (dgvData.DataSource is DataTable dt)
+            {
+                string filterColumn = dt.Columns[1].ColumnName;
+                dt.DefaultView.RowFilter = $"[{filterColumn}] LIKE '%{txtSearch.Text}%'";
+            }
+        }
+    }
+}
+
+// ===== UI\Database\EditRecordForm.Designer.cs =====
+﻿namespace Mb.UI.Database
+{
+    partial class EditRecordForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            pnlHeader = new Panel();
+            lblTitle = new Label();
+            flpFields = new FlowLayoutPanel();
+            pnlFooter = new Panel();
+            btnSave = new Button();
+            btnCancel = new Button();
+            pnlHeader.SuspendLayout();
+            pnlFooter.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlHeader
+            // 
+            pnlHeader.BackColor = Color.FromArgb(46, 74, 107);
+            pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Dock = DockStyle.Top;
+            pnlHeader.Location = new Point(0, 0);
+            pnlHeader.Name = "pnlHeader";
+            pnlHeader.Size = new Size(426, 70);
+            pnlHeader.TabIndex = 0;
+            // 
+            // lblTitle
+            // 
+            lblTitle.AutoSize = true;
+            lblTitle.Font = new Font("Segoe UI Light", 18F);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.Location = new Point(28, 16);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(232, 41);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "Редактирование";
+            // 
+            // flpFields
+            // 
+            flpFields.AutoScroll = true;
+            flpFields.BackColor = Color.White;
+            flpFields.Dock = DockStyle.Fill;
+            flpFields.FlowDirection = FlowDirection.TopDown;
+            flpFields.Location = new Point(0, 70);
+            flpFields.Name = "flpFields";
+            flpFields.Padding = new Padding(32, 16, 32, 16);
+            flpFields.Size = new Size(426, 495);
+            flpFields.TabIndex = 1;
+            flpFields.WrapContents = false;
+            // 
+            // pnlFooter
+            // 
+            pnlFooter.BackColor = Color.FromArgb(244, 246, 250);
+            pnlFooter.Controls.Add(btnSave);
+            pnlFooter.Controls.Add(btnCancel);
+            pnlFooter.Dock = DockStyle.Bottom;
+            pnlFooter.Location = new Point(0, 565);
+            pnlFooter.Name = "pnlFooter";
+            pnlFooter.Size = new Size(426, 80);
+            pnlFooter.TabIndex = 2;
+            // 
+            // btnSave
+            // 
+            btnSave.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnSave.BackColor = Color.FromArgb(46, 74, 107);
+            btnSave.Cursor = Cursors.Hand;
+            btnSave.DialogResult = DialogResult.OK;
+            btnSave.FlatAppearance.BorderSize = 0;
+            btnSave.FlatStyle = FlatStyle.Flat;
+            btnSave.Font = new Font("Segoe UI", 10.5F);
+            btnSave.ForeColor = Color.White;
+            btnSave.Location = new Point(270, 20);
+            btnSave.Name = "btnSave";
+            btnSave.Size = new Size(124, 42);
+            btnSave.TabIndex = 0;
+            btnSave.Text = "Сохранить";
+            btnSave.UseVisualStyleBackColor = false;
+            // 
+            // btnCancel
+            // 
+            btnCancel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnCancel.BackColor = Color.White;
+            btnCancel.Cursor = Cursors.Hand;
+            btnCancel.DialogResult = DialogResult.Cancel;
+            btnCancel.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnCancel.FlatStyle = FlatStyle.Flat;
+            btnCancel.Font = new Font("Segoe UI", 10.5F);
+            btnCancel.ForeColor = Color.FromArgb(108, 117, 125);
+            btnCancel.Location = new Point(142, 20);
+            btnCancel.Name = "btnCancel";
+            btnCancel.Size = new Size(120, 42);
+            btnCancel.TabIndex = 1;
+            btnCancel.Text = "Отмена";
+            btnCancel.UseVisualStyleBackColor = false;
+            // 
+            // EditRecordForm
+            // 
+            AcceptButton = btnSave;
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.White;
+            CancelButton = btnCancel;
+            ClientSize = new Size(426, 645);
+            Controls.Add(flpFields);
+            Controls.Add(pnlFooter);
+            Controls.Add(pnlHeader);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Name = "EditRecordForm";
+            StartPosition = FormStartPosition.CenterParent;
+            Text = "Редактирование записи";
+            pnlHeader.ResumeLayout(false);
+            pnlHeader.PerformLayout();
+            pnlFooter.ResumeLayout(false);
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlHeader;
+        private Label lblTitle;
+        private FlowLayoutPanel flpFields;
+        private Panel pnlFooter;
+        private Button btnSave;
+        private Button btnCancel;
+    }
+}
+
+
+// ===== UI\Database\EditRecordForm.cs =====
+﻿namespace Mb.UI.Database
+{
+    public partial class EditRecordForm : Form
+    {
+        private readonly Dictionary<string, TextBox> inputs = new();
+
+        /// <summary>Edited field values, available after the dialog returns OK.</summary>
+        public Dictionary<string, string> Values =>
+            inputs.ToDictionary(p => p.Key, p => p.Value.Text.Trim());
+
+        public EditRecordForm(string title, IDictionary<string, string?> fields)
+        {
+            InitializeComponent();
+            lblTitle.Text = title;
+            BuildFields(fields);
+        }
+
+        private void BuildFields(IDictionary<string, string?> fields)
+        {
+            flpFields.SuspendLayout();
+            foreach (var (name, value) in fields)
+            {
+                var label = new Label
+                {
+                    Text = name,
+                    AutoSize = false,
+                    Size = new Size(360, 22),
+                    Margin = new Padding(0, 8, 0, 2),
+                    Font = new Font("Segoe UI", 9.75F),
+                    ForeColor = Color.FromArgb(108, 117, 125)
+                };
+                var box = new TextBox
+                {
+                    Text = value ?? string.Empty,
+                    Size = new Size(360, 30),
+                    Margin = new Padding(0, 0, 0, 6),
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Font = new Font("Segoe UI", 11F)
+                };
+                inputs[name] = box;
+                flpFields.Controls.Add(label);
+                flpFields.Controls.Add(box);
+            }
+            flpFields.ResumeLayout();
         }
     }
 }
@@ -1030,7 +1771,6 @@ namespace Mb.UI.Login
 
             try
             {
-
                 bool isSuccess = authService.Login(login, password);
                 if (isSuccess)
                 {
@@ -1051,22 +1791,21 @@ namespace Mb.UI.Login
             }
         }
         private void lnkLogin_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
-{
-    this.Close(); // Просто закрываем форму регистрации
-}
+        {
+            this.Close(); // Просто закрываем форму регистрации
+        }
 
        private void lnkRegister_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
-{
-    RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
+        {
+            RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
 
-    this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
+            this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
 
-    registerForm.ShowDialog(); // Открываем регистрацию
+            registerForm.ShowDialog(); // Открываем регистрацию
 
-    this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
-}
+            this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
+        }
     }
-    
 }
 
 
@@ -1366,6 +2105,7 @@ namespace Mb.UI.Login
             lnkLogin.TabStop = true;
             lnkLogin.Text = "Уже есть аккаунт? Войти";
             lnkLogin.TextAlign = ContentAlignment.MiddleCenter;
+            lnkLogin.UseCompatibleTextRendering = true;
             // 
             // btnRegister
             // 
@@ -1381,6 +2121,7 @@ namespace Mb.UI.Login
             btnRegister.TabIndex = 8;
             btnRegister.Text = "Зарегистрироваться";
             btnRegister.UseVisualStyleBackColor = false;
+            btnRegister.Click += btnRegister_Click;
             // 
             // txtConfirm
             // 
@@ -1389,7 +2130,7 @@ namespace Mb.UI.Login
             txtConfirm.Location = new Point(36, 310);
             txtConfirm.Name = "txtConfirm";
             txtConfirm.PlaceholderText = "Повторите пароль";
-            txtConfirm.Size = new Size(288, 30);
+            txtConfirm.Size = new Size(288, 32);
             txtConfirm.TabIndex = 7;
             txtConfirm.UseSystemPasswordChar = true;
             // 
@@ -1400,7 +2141,7 @@ namespace Mb.UI.Login
             lblConfirm.ForeColor = Color.FromArgb(108, 117, 125);
             lblConfirm.Location = new Point(34, 286);
             lblConfirm.Name = "lblConfirm";
-            lblConfirm.Size = new Size(132, 20);
+            lblConfirm.Size = new Size(173, 23);
             lblConfirm.TabIndex = 6;
             lblConfirm.Text = "Подтвердите пароль";
             // 
@@ -1411,7 +2152,7 @@ namespace Mb.UI.Login
             txtPassword.Location = new Point(36, 240);
             txtPassword.Name = "txtPassword";
             txtPassword.PlaceholderText = "Введите пароль";
-            txtPassword.Size = new Size(288, 30);
+            txtPassword.Size = new Size(288, 32);
             txtPassword.TabIndex = 5;
             txtPassword.UseSystemPasswordChar = true;
             // 
@@ -1422,7 +2163,7 @@ namespace Mb.UI.Login
             lblPassword.ForeColor = Color.FromArgb(108, 117, 125);
             lblPassword.Location = new Point(34, 216);
             lblPassword.Name = "lblPassword";
-            lblPassword.Size = new Size(54, 20);
+            lblPassword.Size = new Size(69, 23);
             lblPassword.TabIndex = 4;
             lblPassword.Text = "Пароль";
             // 
@@ -1433,7 +2174,7 @@ namespace Mb.UI.Login
             txtEmail.Location = new Point(36, 170);
             txtEmail.Name = "txtEmail";
             txtEmail.PlaceholderText = "Введите email";
-            txtEmail.Size = new Size(288, 30);
+            txtEmail.Size = new Size(288, 32);
             txtEmail.TabIndex = 3;
             // 
             // lblEmail
@@ -1443,7 +2184,7 @@ namespace Mb.UI.Login
             lblEmail.ForeColor = Color.FromArgb(108, 117, 125);
             lblEmail.Location = new Point(34, 146);
             lblEmail.Name = "lblEmail";
-            lblEmail.Size = new Size(46, 20);
+            lblEmail.Size = new Size(51, 23);
             lblEmail.TabIndex = 2;
             lblEmail.Text = "Email";
             // 
@@ -1505,11 +2246,338 @@ namespace Mb.UI.Login
 
 
 // ===== UI\Register\RegisterForm.cs =====
-﻿namespace Mb.UI.Register
+﻿using System.Linq.Expressions;
+
+namespace Mb.UI.Register
 {
     public partial class RegisterForm : Form
     {
-        public RegisterForm()
+
+        private readonly AuthService authService;
+        public RegisterForm(AuthService authService)
+        {
+            InitializeComponent();
+            this.authService = authService;
+        }
+        private void btnRegister_Click(object sender, EventArgs e)
+        {
+            string email = txtEmail.Text.Trim();
+            string password = txtPassword.Text.Trim();
+            string confirm = txtConfirm.Text;
+
+            if(string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password) || string.IsNullOrEmpty(confirm))
+            {
+                MessageBox.Show("Пожалуйста, заполните все поля", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+
+            }
+
+            if (password != confirm)
+            {
+                MessageBox.Show("Ваши пароли не совпадают", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (password.Length < 6)
+            {
+                MessageBox.Show("Пароль может меньше 6 цифр", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                bool isSuccess = authService.Register(email, password, "Гость");
+                
+                if (isSuccess)
+                {
+
+                    MessageBox.Show("Регистрация прошла успешно. Теперь войдите в систему", "УСПЕХ", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    this.Close();
+                }
+                else
+                {
+                    MessageBox.Show("Не удалось зарегистрировать Вас в систему", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                } 
+            } catch (Exception ex)
+
+            {
+                MessageBox.Show($"Не удалось зарегистрировать Вас в систему, возможно пользователь с таким Email уже существует. {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        private void lnkLogin_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            // Просто закрываем эту форму, под ней уже открыта форма логина (мы ее скрыли через Hide())
+            this.Close();
+        }
+
+    }
+}
+
+
+// ===== UI\Reports\ReportsForm.Designer.cs =====
+﻿namespace Mb.UI.Reports
+{
+    partial class ReportsForm
+    {
+        /// <summary>
+        /// Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        /// Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        /// Required method for Designer support - do not modify
+        /// the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            pnlHeader = new Panel();
+            lblTitle = new Label();
+            pnlSidebar = new Panel();
+            lblSidebarCaption = new Label();
+            lstReports = new ListBox();
+            pnlContent = new Panel();
+            dgvReport = new DataGridView();
+            pnlFooter = new Panel();
+            btnHome = new Button();
+            btnExport = new Button();
+            btnGenerate = new Button();
+            pnlHeader.SuspendLayout();
+            pnlSidebar.SuspendLayout();
+            pnlContent.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)dgvReport).BeginInit();
+            pnlFooter.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlHeader
+            // 
+            pnlHeader.BackColor = Color.FromArgb(46, 74, 107);
+            pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Dock = DockStyle.Top;
+            pnlHeader.Name = "pnlHeader";
+            pnlHeader.Size = new Size(1284, 80);
+            pnlHeader.TabIndex = 0;
+            // 
+            // lblTitle
+            // 
+            lblTitle.AutoSize = true;
+            lblTitle.Font = new Font("Segoe UI Light", 20F);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.Location = new Point(36, 20);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(108, 37);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "Отчёты";
+            // 
+            // pnlSidebar
+            // 
+            pnlSidebar.BackColor = Color.FromArgb(237, 241, 246);
+            pnlSidebar.Controls.Add(lstReports);
+            pnlSidebar.Controls.Add(lblSidebarCaption);
+            pnlSidebar.Dock = DockStyle.Left;
+            pnlSidebar.Name = "pnlSidebar";
+            pnlSidebar.Padding = new Padding(20, 20, 20, 20);
+            pnlSidebar.Size = new Size(300, 610);
+            pnlSidebar.TabIndex = 1;
+            // 
+            // lblSidebarCaption
+            // 
+            lblSidebarCaption.Dock = DockStyle.Top;
+            lblSidebarCaption.Font = new Font("Segoe UI Semibold", 11F);
+            lblSidebarCaption.ForeColor = Color.FromArgb(74, 85, 104);
+            lblSidebarCaption.Location = new Point(20, 20);
+            lblSidebarCaption.Name = "lblSidebarCaption";
+            lblSidebarCaption.Size = new Size(260, 36);
+            lblSidebarCaption.TabIndex = 0;
+            lblSidebarCaption.Text = "Доступные отчёты";
+            lblSidebarCaption.TextAlign = ContentAlignment.MiddleLeft;
+            // 
+            // lstReports
+            // 
+            lstReports.BorderStyle = BorderStyle.FixedSingle;
+            lstReports.Dock = DockStyle.Fill;
+            lstReports.Font = new Font("Segoe UI", 11F);
+            lstReports.ForeColor = Color.FromArgb(44, 62, 80);
+            lstReports.IntegralHeight = false;
+            lstReports.ItemHeight = 30;
+            lstReports.Items.AddRange(new object[] { "Все пользователи", "Пользователи по ролям", "Сводная статистика" });
+            lstReports.Name = "lstReports";
+            lstReports.Size = new Size(260, 534);
+            lstReports.TabIndex = 1;
+            // 
+            // pnlContent
+            // 
+            pnlContent.BackColor = Color.FromArgb(244, 246, 250);
+            pnlContent.Controls.Add(dgvReport);
+            pnlContent.Dock = DockStyle.Fill;
+            pnlContent.Name = "pnlContent";
+            pnlContent.Padding = new Padding(28, 24, 28, 24);
+            pnlContent.Size = new Size(984, 610);
+            pnlContent.TabIndex = 2;
+            // 
+            // dgvReport
+            // 
+            dgvReport.AllowUserToAddRows = false;
+            dgvReport.AllowUserToDeleteRows = false;
+            dgvReport.BackgroundColor = Color.White;
+            dgvReport.BorderStyle = BorderStyle.FixedSingle;
+            dgvReport.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            dgvReport.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            dgvReport.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(46, 74, 107),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 10F),
+                Alignment = DataGridViewContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 0, 0),
+                SelectionBackColor = Color.FromArgb(46, 74, 107),
+                SelectionForeColor = Color.White
+            };
+            dgvReport.ColumnHeadersHeight = 44;
+            dgvReport.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            dgvReport.DefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.White,
+                ForeColor = Color.FromArgb(44, 62, 80),
+                Font = new Font("Segoe UI", 10F),
+                Padding = new Padding(8, 0, 0, 0),
+                SelectionBackColor = Color.FromArgb(225, 232, 242),
+                SelectionForeColor = Color.FromArgb(44, 62, 80)
+            };
+            dgvReport.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(248, 250, 252)
+            };
+            dgvReport.Dock = DockStyle.Fill;
+            dgvReport.EnableHeadersVisualStyles = false;
+            dgvReport.GridColor = Color.FromArgb(233, 236, 239);
+            dgvReport.Name = "dgvReport";
+            dgvReport.ReadOnly = true;
+            dgvReport.RowHeadersVisible = false;
+            dgvReport.RowTemplate.Height = 40;
+            dgvReport.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvReport.TabIndex = 0;
+            // 
+            // pnlFooter
+            // 
+            pnlFooter.BackColor = Color.White;
+            pnlFooter.Controls.Add(btnHome);
+            pnlFooter.Controls.Add(btnExport);
+            pnlFooter.Controls.Add(btnGenerate);
+            pnlFooter.Dock = DockStyle.Bottom;
+            pnlFooter.Name = "pnlFooter";
+            pnlFooter.Padding = new Padding(36, 0, 36, 0);
+            pnlFooter.Size = new Size(1284, 80);
+            pnlFooter.TabIndex = 3;
+            // 
+            // btnHome
+            // 
+            btnHome.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 10.5F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(1104, 19);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(140, 42);
+            btnHome.TabIndex = 2;
+            btnHome.Text = "На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            // 
+            // btnExport
+            // 
+            btnExport.BackColor = Color.White;
+            btnExport.Cursor = Cursors.Hand;
+            btnExport.FlatAppearance.BorderColor = Color.FromArgb(46, 74, 107);
+            btnExport.FlatStyle = FlatStyle.Flat;
+            btnExport.Font = new Font("Segoe UI", 10.5F);
+            btnExport.ForeColor = Color.FromArgb(46, 74, 107);
+            btnExport.Location = new Point(196, 19);
+            btnExport.Name = "btnExport";
+            btnExport.Size = new Size(140, 42);
+            btnExport.TabIndex = 1;
+            btnExport.Text = "Экспорт";
+            btnExport.UseVisualStyleBackColor = false;
+            // 
+            // btnGenerate
+            // 
+            btnGenerate.BackColor = Color.FromArgb(46, 74, 107);
+            btnGenerate.Cursor = Cursors.Hand;
+            btnGenerate.FlatAppearance.BorderSize = 0;
+            btnGenerate.FlatStyle = FlatStyle.Flat;
+            btnGenerate.Font = new Font("Segoe UI", 10.5F);
+            btnGenerate.ForeColor = Color.White;
+            btnGenerate.Location = new Point(36, 19);
+            btnGenerate.Name = "btnGenerate";
+            btnGenerate.Size = new Size(150, 42);
+            btnGenerate.TabIndex = 0;
+            btnGenerate.Text = "Сформировать";
+            btnGenerate.UseVisualStyleBackColor = false;
+            // 
+            // ReportsForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.White;
+            ClientSize = new Size(1284, 770);
+            Controls.Add(pnlContent);
+            Controls.Add(pnlSidebar);
+            Controls.Add(pnlFooter);
+            Controls.Add(pnlHeader);
+            MinimumSize = new Size(900, 560);
+            Name = "ReportsForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            WindowState = FormWindowState.Maximized;
+            Text = "Отчёты";
+            pnlHeader.ResumeLayout(false);
+            pnlHeader.PerformLayout();
+            pnlSidebar.ResumeLayout(false);
+            pnlContent.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)dgvReport).EndInit();
+            pnlFooter.ResumeLayout(false);
+            ResumeLayout(false);
+        }
+
+        #endregion
+
+        private Panel pnlHeader;
+        private Label lblTitle;
+        private Panel pnlSidebar;
+        private Label lblSidebarCaption;
+        private ListBox lstReports;
+        private Panel pnlContent;
+        private DataGridView dgvReport;
+        private Panel pnlFooter;
+        private Button btnGenerate;
+        private Button btnExport;
+        private Button btnHome;
+    }
+}
+
+
+// ===== UI\Reports\ReportsForm.cs =====
+﻿namespace Mb.UI.Reports
+{
+    public partial class ReportsForm : Form
+    {
+        public ReportsForm()
         {
             InitializeComponent();
         }

@@ -31,6 +31,7 @@
             pnlCard = new Panel();
             lnkLogin = new LinkLabel();
             btnRegister = new Button();
+            btnHome = new Button();
             txtConfirm = new TextBox();
             lblConfirm = new Label();
             txtPassword = new TextBox();
@@ -49,6 +50,7 @@
             pnlCard.BorderStyle = BorderStyle.FixedSingle;
             pnlCard.Controls.Add(lnkLogin);
             pnlCard.Controls.Add(btnRegister);
+            pnlCard.Controls.Add(btnHome);
             pnlCard.Controls.Add(txtConfirm);
             pnlCard.Controls.Add(lblConfirm);
             pnlCard.Controls.Add(txtPassword);
@@ -75,6 +77,7 @@
             lnkLogin.TabStop = true;
             lnkLogin.Text = "Уже есть аккаунт? Войти";
             lnkLogin.TextAlign = ContentAlignment.MiddleCenter;
+            lnkLogin.UseCompatibleTextRendering = true;
             // 
             // btnRegister
             // 
@@ -90,6 +93,7 @@
             btnRegister.TabIndex = 8;
             btnRegister.Text = "Зарегистрироваться";
             btnRegister.UseVisualStyleBackColor = false;
+            btnRegister.Click += btnRegister_Click;
             // 
             // txtConfirm
             // 
@@ -98,7 +102,7 @@
             txtConfirm.Location = new Point(36, 310);
             txtConfirm.Name = "txtConfirm";
             txtConfirm.PlaceholderText = "Повторите пароль";
-            txtConfirm.Size = new Size(288, 30);
+            txtConfirm.Size = new Size(288, 32);
             txtConfirm.TabIndex = 7;
             txtConfirm.UseSystemPasswordChar = true;
             // 
@@ -109,7 +113,7 @@
             lblConfirm.ForeColor = Color.FromArgb(108, 117, 125);
             lblConfirm.Location = new Point(34, 286);
             lblConfirm.Name = "lblConfirm";
-            lblConfirm.Size = new Size(132, 20);
+            lblConfirm.Size = new Size(173, 23);
             lblConfirm.TabIndex = 6;
             lblConfirm.Text = "Подтвердите пароль";
             // 
@@ -120,7 +124,7 @@
             txtPassword.Location = new Point(36, 240);
             txtPassword.Name = "txtPassword";
             txtPassword.PlaceholderText = "Введите пароль";
-            txtPassword.Size = new Size(288, 30);
+            txtPassword.Size = new Size(288, 32);
             txtPassword.TabIndex = 5;
             txtPassword.UseSystemPasswordChar = true;
             // 
@@ -131,7 +135,7 @@
             lblPassword.ForeColor = Color.FromArgb(108, 117, 125);
             lblPassword.Location = new Point(34, 216);
             lblPassword.Name = "lblPassword";
-            lblPassword.Size = new Size(54, 20);
+            lblPassword.Size = new Size(69, 23);
             lblPassword.TabIndex = 4;
             lblPassword.Text = "Пароль";
             // 
@@ -142,7 +146,7 @@
             txtEmail.Location = new Point(36, 170);
             txtEmail.Name = "txtEmail";
             txtEmail.PlaceholderText = "Введите email";
-            txtEmail.Size = new Size(288, 30);
+            txtEmail.Size = new Size(288, 32);
             txtEmail.TabIndex = 3;
             // 
             // lblEmail
@@ -152,7 +156,7 @@
             lblEmail.ForeColor = Color.FromArgb(108, 117, 125);
             lblEmail.Location = new Point(34, 146);
             lblEmail.Name = "lblEmail";
-            lblEmail.Size = new Size(46, 20);
+            lblEmail.Size = new Size(51, 23);
             lblEmail.TabIndex = 2;
             lblEmail.Text = "Email";
             // 
@@ -177,6 +181,22 @@
             lblTitle.TabIndex = 0;
             lblTitle.Text = "Регистрация";
             lblTitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(107, 470);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(150, 36);
+            btnHome.TabIndex = 10;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += (s, e) => this.Close();
             // 
             // RegisterForm
             // 
@@ -208,6 +228,7 @@
         private Label lblConfirm;
         private TextBox txtConfirm;
         private Button btnRegister;
+        private Button btnHome;
         private LinkLabel lnkLogin;
     }
 }

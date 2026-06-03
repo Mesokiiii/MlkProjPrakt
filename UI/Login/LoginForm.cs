@@ -40,7 +40,6 @@ namespace Mb.UI.Login
 
             try
             {
-
                 bool isSuccess = authService.Login(login, password);
                 if (isSuccess)
                 {
@@ -61,20 +60,19 @@ namespace Mb.UI.Login
             }
         }
         private void lnkLogin_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
-{
-    this.Close(); // Просто закрываем форму регистрации
-}
+        {
+            this.Close(); // Просто закрываем форму регистрации
+        }
 
        private void lnkRegister_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
-{
-    RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
+        {
+            RegisterForm registerForm = services.GetRequiredService<RegisterForm>();
 
-    this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
+            this.Hide(); // ЭТА СТРОЧКА СКРОЕТ ОКНО ВХОДА (оно полностью исчезнет с экрана)
 
-    registerForm.ShowDialog(); // Открываем регистрацию
+            registerForm.ShowDialog(); // Открываем регистрацию
 
-    this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
-}
+            this.Show(); // Когда пользователь закроет регистрацию, окно входа появится снова!
+        }
     }
-    
 }

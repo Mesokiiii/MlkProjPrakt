@@ -31,6 +31,7 @@
             pnlCard = new Panel();
             lnkRegister = new LinkLabel();
             btnLogin = new Button();
+            btnHome = new Button();
             txtPassword = new TextBox();
             lblPassword = new Label();
             txtLogin = new TextBox();
@@ -47,6 +48,7 @@
             pnlCard.BorderStyle = BorderStyle.FixedSingle;
             pnlCard.Controls.Add(lnkRegister);
             pnlCard.Controls.Add(btnLogin);
+            pnlCard.Controls.Add(btnHome);
             pnlCard.Controls.Add(txtPassword);
             pnlCard.Controls.Add(lblPassword);
             pnlCard.Controls.Add(txtLogin);
@@ -155,6 +157,22 @@
             lblTitle.Text = "Авторизация";
             lblTitle.TextAlign = ContentAlignment.MiddleCenter;
             // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(107, 390);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(150, 36);
+            btnHome.TabIndex = 10;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += (s, e) => this.Close();
+            // 
             // LoginForm
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
@@ -183,6 +201,7 @@
         private Label lblPassword;
         private TextBox txtPassword;
         private Button btnLogin;
+        private Button btnHome;
         private LinkLabel lnkRegister;
     }
 }

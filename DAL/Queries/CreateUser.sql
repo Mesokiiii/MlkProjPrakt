@@ -1,2 +1,2 @@
-INSERT INTO Users (Login, Password, Role) 
+INSERT INTO Пользователи (Логин, Пароль, Роль) 
 VALUES (?, ?, ?);

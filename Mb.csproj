@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +21,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="DAL\Queries\ChangePassword.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="DAL\Queries\CreateUser.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="DAL\Queries\ValidateUser.sql">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

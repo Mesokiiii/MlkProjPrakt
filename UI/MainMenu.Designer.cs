@@ -123,6 +123,7 @@ partial class MainMenu
         pnlProfile.Name = "pnlProfile";
         pnlProfile.Size = new Size(340, 120);
         pnlProfile.TabIndex = 3;
+        pnlProfile.Click += pnlProfile_Click;
         // 
         // lblProfileDesc
         // 
@@ -134,6 +135,7 @@ partial class MainMenu
         lblProfileDesc.Name = "lblProfileDesc";
         lblProfileDesc.Size = new Size(307, 46);
         lblProfileDesc.TabIndex = 1;
+        lblProfileDesc.Click += pnlProfile_Click;
         lblProfileDesc.Text = "Вход в систему, управление учётной записью и персональными данными.";
         // 
         // lblProfileTitle
@@ -145,6 +147,7 @@ partial class MainMenu
         lblProfileTitle.Name = "lblProfileTitle";
         lblProfileTitle.Size = new Size(201, 31);
         lblProfileTitle.TabIndex = 0;
+        lblProfileTitle.Click += pnlProfile_Click;
         lblProfileTitle.Text = "Личный кабинет";
         // 
         // pnlReports
@@ -157,6 +160,7 @@ partial class MainMenu
         pnlReports.Name = "pnlReports";
         pnlReports.Size = new Size(340, 104);
         pnlReports.TabIndex = 4;
+        pnlReports.Click += pnlReports_Click;
         // 
         // lblReportsDesc
         // 
@@ -168,6 +172,7 @@ partial class MainMenu
         lblReportsDesc.Name = "lblReportsDesc";
         lblReportsDesc.Size = new Size(238, 46);
         lblReportsDesc.TabIndex = 1;
+        lblReportsDesc.Click += pnlReports_Click;
         lblReportsDesc.Text = "Сводная статистика по всем разделам системы.";
         // 
         // lblReportsTitle
@@ -179,6 +184,7 @@ partial class MainMenu
         lblReportsTitle.Name = "lblReportsTitle";
         lblReportsTitle.Size = new Size(96, 31);
         lblReportsTitle.TabIndex = 0;
+        lblReportsTitle.Click += pnlReports_Click;
         lblReportsTitle.Text = "Отчёты";
         // 
         // pnlAbout
@@ -191,6 +197,7 @@ partial class MainMenu
         pnlAbout.Name = "pnlAbout";
         pnlAbout.Size = new Size(340, 104);
         pnlAbout.TabIndex = 5;
+        pnlAbout.Click += pnlAbout_Click;
         // 
         // lblAboutDesc
         // 
@@ -202,6 +209,7 @@ partial class MainMenu
         lblAboutDesc.Name = "lblAboutDesc";
         lblAboutDesc.Size = new Size(302, 46);
         lblAboutDesc.TabIndex = 1;
+        lblAboutDesc.Click += pnlAbout_Click;
         lblAboutDesc.Text = "Информация о версии, технологиях и разработчиках.";
         // 
         // lblAboutTitle
@@ -213,6 +221,7 @@ partial class MainMenu
         lblAboutTitle.Name = "lblAboutTitle";
         lblAboutTitle.Size = new Size(162, 31);
         lblAboutTitle.TabIndex = 0;
+        lblAboutTitle.Click += pnlAbout_Click;
         lblAboutTitle.Text = "О программе";
         // 
         // btnExit

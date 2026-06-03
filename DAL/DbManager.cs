@@ -1,8 +1,7 @@
-using System.Configuration;
 using System.Data.OleDb;
-using System.Linq.Expressions; 
 using System.IO;
 
+// Класс для работы с пользователями (авторизация, регистрация, смена пароля)
 public class DbManager
 {
     private readonly string connectionString;
@@ -11,21 +10,8 @@ public class DbManager
     {
         this.connectionString = connectionString;
     }
-    
-    // public bool TestConnection()
-    // {
-    //     using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
-    //     {
-    //         try
-    //         {
-    //             oleDbConnection.Open();
-    //             return true;
-    //         } catch (Exception)
-    //         {
-    //             return false;
-    //         }
-    //     } 
-    // }
+
+    // Загружает SQL-запрос из файла в папке DAL/Queries
     private string GetSqlQuery(string fileName)
     {
         string sqlFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DAL", "Queries");
@@ -33,19 +19,19 @@ public class DbManager
 
         if (!File.Exists(fullPath))
         {
-            throw new FileNotFoundException($"Файл запроса не найден. Проверьте наличие файла {fullPath}");
+            throw new FileNotFoundException($"Файл запроса не найден: {fullPath}");
         }
 
         return File.ReadAllText(fullPath);
     }
 
+    // Проверка логина и пароля, возвращает роль пользователя или null
     public string ValidateUser(string login, string password)
     {
         string query = GetSqlQuery("ValidateUser.sql");
 
         using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
         {
-        
             using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
             {
                 oleDbCommand.Parameters.AddWithValue("?", login);
@@ -58,25 +44,24 @@ public class DbManager
                     if (result != null)
                     {
                         return result.ToString();
-
                     }
-
-                } catch (Exception ex)
+                }
+                catch (Exception ex)
                 {
-                    throw new Exception("Ошибка при получении пользователя" + ex.Message);
-
+                    throw new Exception("Ошибка при проверке пользователя: " + ex.Message);
                 }
             }
-        } return null;
+        }
+        return null;
     }
 
+    // Создание нового пользователя в БД
     public bool CreateUser(string login, string hashedPassword, string role)
     {
         string query = GetSqlQuery("CreateUser.sql");
 
-          using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
         {
-        
             using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
             {
                 oleDbCommand.Parameters.AddWithValue("?", login);
@@ -87,15 +72,39 @@ public class DbManager
                 {
                     oleDbConnection.Open();
                     int rowsAffected = oleDbCommand.ExecuteNonQuery();
-                
-                   // Если добавлена хотя бы 1 строка, значит регистрация успешна
-                   return rowsAffected > 0; 
+                    return rowsAffected > 0;
                 }
                 catch (Exception ex)
-                                       {
-                // Сохраняем оригинальный StackTrace через inner exception
-                throw new Exception("Ошибка при создании нового пользователя", ex);
-                                       }
+                {
+                    throw new Exception("Ошибка при создании пользователя", ex);
+                }
+            }
+        }
+    }
+
+    // Смена пароля: проверяет старый пароль и заменяет на новый
+    public bool ChangePassword(string login, string oldHashedPassword, string newHashedPassword)
+    {
+        string query = GetSqlQuery("ChangePassword.sql");
+
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        {
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+            {
+                oleDbCommand.Parameters.AddWithValue("?", newHashedPassword);
+                oleDbCommand.Parameters.AddWithValue("?", login);
+                oleDbCommand.Parameters.AddWithValue("?", oldHashedPassword);
+
+                try
+                {
+                    oleDbConnection.Open();
+                    int rowsAffected = oleDbCommand.ExecuteNonQuery();
+                    return rowsAffected > 0;
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception("Ошибка при смене пароля", ex);
+                }
             }
         }
     }

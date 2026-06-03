@@ -1,4 +1,6 @@
 using System.Configuration;
+using System.Data.OleDb;
+using Mb.UI.Database;
 using Mb.UI.Login;
 using Mb.UI.Register;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,9 +15,24 @@ static class Program
     [STAThread]
     static void Main()
     {
-        // To customize application configuration such as set high DPI settings or default font,
-        // see https://aka.ms/applicationconfiguration.
         ApplicationConfiguration.Initialize();
+
+        // Проверка наличия драйвера OleDb — пробуем создать подключение
+        try
+        {
+            string cs = ConfigurationManager.ConnectionStrings["HospitalDB"].ConnectionString;
+            using var testConnection = new OleDbConnection(cs);
+            testConnection.Open();
+            testConnection.Close();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(
+                "Не удалось подключиться к базе данных.\n" +
+                "Убедитесь, что драйвер Microsoft Access Database Engine установлен.",
+                "Ошибка запуска", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
 
         var services = new ServiceCollection();
         ConfigureServices(services);
@@ -35,7 +52,11 @@ static class Program
         services.AddSingleton<AuthService>();
         services.AddSingleton<MainMenu>();
 
+        services.AddTransient<DatabaseForm>();
         services.AddTransient<RegisterForm>();
         services.AddTransient<LoginForm>();
+        services.AddTransient<Mb.UI.Profile.ProfileForm>();
+        services.AddTransient<Mb.UI.Reports.ReportsForm>();
+        services.AddTransient<Mb.UI.About.AboutForm>();
     }
 }
