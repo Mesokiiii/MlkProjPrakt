@@ -14,12 +14,14 @@ namespace Mb.UI.Database
         {
             InitializeComponent();
 
-            // Скрываем кнопки редактирования для не-администраторов
+            // Показываем кнопки редактирования только для ролей с правами
             this.Load += (s, e) => {
-                bool isPrivileged = UserSession.CurrentRole == "Администратор";
-                btnAdd.Visible = isPrivileged;
-                btnEdit.Visible = isPrivileged;
-                btnDelete.Visible = isPrivileged;
+                string role = UserSession.CurrentRole;
+                bool canEdit = (role == Roles.Admin || role == Roles.HeadDoctor);
+                bool canDelete = (role == Roles.Admin);
+                btnAdd.Visible = canEdit;
+                btnEdit.Visible = canEdit;
+                btnDelete.Visible = canDelete;
             };
 
             this.dataService = dataService;
@@ -42,11 +44,6 @@ namespace Mb.UI.Database
                 MessageBox.Show("Ошибка загрузки: " + ex.Message);
             }
         }
-
-        private void cmbTables_SelectedIndexChanged(object sender, EventArgs e) => LoadData();
-        private void btnRefresh_Click(object sender, EventArgs e) => LoadData();
-        private void btnHome_Click(object sender, EventArgs e) => this.Close();
-        private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
 
         // Удаление выбранной записи с подтверждением
         private void btnDelete_Click(object sender, EventArgs e)
@@ -142,5 +139,12 @@ namespace Mb.UI.Database
                 dt.DefaultView.RowFilter = $"[{filterColumn}] LIKE '%{txtSearch.Text}%'";
             }
         }
+
+        private void cmbTables_SelectedIndexChanged(object sender, EventArgs e) => LoadData();
+        private void btnRefresh_Click(object sender, EventArgs e) => LoadData();
+        private void btnHome_Click(object sender, EventArgs e) => this.Close();
+        private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
+
+
     }
 }

@@ -38,7 +38,7 @@ namespace Mb.UI.Register
 
             try
             {
-                bool isSuccess = authService.Register(email, password, "Гость");
+                bool isSuccess = authService.Register(email, password, Roles.Guest);
                 
                 if (isSuccess)
                 {

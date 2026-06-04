@@ -1,5 +1,6 @@
 // ===== Program.cs =====
 using System.Configuration;
+using System.Data.OleDb;
 using Mb.UI.Database;
 using Mb.UI.Login;
 using Mb.UI.Register;
@@ -15,9 +16,24 @@ static class Program
     [STAThread]
     static void Main()
     {
-        // To customize application configuration such as set high DPI settings or default font,
-        // see https://aka.ms/applicationconfiguration.
         ApplicationConfiguration.Initialize();
+
+        // Проверка наличия драйвера OleDb — пробуем создать подключение
+        try
+        {
+            string cs = ConfigurationManager.ConnectionStrings["HospitalDB"].ConnectionString;
+            using var testConnection = new OleDbConnection(cs);
+            testConnection.Open();
+            testConnection.Close();
+        }
+        catch (Exception)
+        {
+            MessageBox.Show(
+                "Не удалось подключиться к базе данных.\n" +
+                "Убедитесь, что драйвер Microsoft Access Database Engine установлен.",
+                "Ошибка запуска", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
 
         var services = new ServiceCollection();
         ConfigureServices(services);
@@ -40,6 +56,9 @@ static class Program
         services.AddTransient<DatabaseForm>();
         services.AddTransient<RegisterForm>();
         services.AddTransient<LoginForm>();
+        services.AddTransient<Mb.UI.Profile.ProfileForm>();
+        services.AddTransient<Mb.UI.Reports.ReportsForm>();
+        services.AddTransient<Mb.UI.About.AboutForm>();
     }
 }
 
@@ -47,6 +66,7 @@ static class Program
 // ===== BLL\AuthService.cs =====
 using System;
 
+// Сервис авторизации: вход, регистрация, выход, смена пароля
 public class AuthService
 {
     private readonly DbManager db;
@@ -58,63 +78,74 @@ public class AuthService
         this.db = db;
     }
 
+    // Вход в систему с защитой от брутфорса (3 попытки → блокировка 30 мин)
     public bool Login(string login, string userTextPassword)
     {
+        // Проверяем, не заблокирован ли пользователь
         if (lockoutEndTime.HasValue)
         {
             if (DateTime.Now < lockoutEndTime.Value)
             {
                 int remainingMinutes = (int)(lockoutEndTime.Value - DateTime.Now).TotalMinutes;
+                if (remainingMinutes <= 0) remainingMinutes = 1;
 
-                if (remainingMinutes <= 0)
-                {
-                    remainingMinutes = 1;
-                }
-
-                throw new Exception($"Превышено количество попыток входа. Система заблокирована. Попробуйте через {remainingMinutes} минут.");
+                throw new Exception($"Система заблокирована. Попробуйте через {remainingMinutes} минут.");
             }
             else
             {
-                // Время блокировки истекло, сбрасываем счетчики
+                // Время блокировки истекло
                 failedAttempts = 0;
                 lockoutEndTime = null;
             }
         }
 
+        // Хешируем пароль и проверяем в БД
         string hashedPassword = PasswordHasher.Hash(userTextPassword);
         string role = db.ValidateUser(login, hashedPassword);
 
         if (role != null)
         {
+            // Успешный вход — сохраняем сессию
             failedAttempts = 0;
-
             UserSession.CurrentRole = role;
             UserSession.CurrentUserName = login;
             return true;
         }
         else
         {
+            // Неудачная попытка
             failedAttempts++;
 
             if (failedAttempts >= 3)
             {
                 lockoutEndTime = DateTime.Now.AddMinutes(30);
-                throw new Exception("Слишком много попыток. повторите через 30 минут");
+                throw new Exception("Слишком много попыток. Повторите через 30 минут.");
             }
             return false;
         }
     }
 
+    // Регистрация нового пользователя с ролью "Гость"
     public bool Register(string login, string password, string role)
     {
         string hashedPassword = PasswordHasher.Hash(password);
-
         return db.CreateUser(login, hashedPassword, role);
     }
 
+    // Выход из системы
     public void LogOut()
     {
         UserSession.Logout();
+    }
+
+    // Смена пароля текущего пользователя
+    public bool ChangePassword(string oldPassword, string newPassword)
+    {
+        string login = UserSession.CurrentUserName;
+        string oldHash = PasswordHasher.Hash(oldPassword);
+        string newHash = PasswordHasher.Hash(newPassword);
+
+        return db.ChangePassword(login, oldHash, newHash);
     }
 }
 
@@ -122,6 +153,7 @@ public class AuthService
 // ===== BLL\DataService.cs =====
 using System.Data;
 
+// Бизнес-логика для работы с данными таблиц
 public class DataService
 {
     private readonly DataRepository repository;
@@ -131,17 +163,20 @@ public class DataService
         this.repository = repository;
     }
 
+    // Получение данных таблицы по имени
     public DataTable GetTable(string tableName)
     {
         try
         {
             return repository.GetDataTable(tableName);
-        } catch (Exception ex)
+        }
+        catch (Exception ex)
         {
-            throw new Exception($"Ошибка при получении данных таблицч: {ex.Message}", ex);
+            throw new Exception($"Ошибка при получении данных таблицы: {ex.Message}", ex);
         }
     }
 
+    // Определяет имя первичного ключа для каждой таблицы
     private string GetPrimaryKeyName(string tableName)
     {
         switch (tableName)
@@ -159,246 +194,258 @@ public class DataService
         }
     }
 
+    // Проверка: может ли текущая роль редактировать данную таблицу
+    private bool CanEdit(string tableName)
+    {
+        string role = UserSession.CurrentRole;
+
+        if (role == Roles.Admin) return true;
+        if (role == Roles.HeadDoctor && (tableName == "Врачи" || tableName == "Отделения")) return true;
+
+        return false;
+    }
+
+    // Удаление записи (только Администратор)
     public bool DataRecord(string tableName, int id)
     {
-        if (UserSession.CurrentRole == "Гость")
+        if (UserSession.CurrentRole != Roles.Admin)
         {
             throw new Exception("У вас нет прав для удаления записей.");
         }
-        
+
         try
         {
             string pkName = GetPrimaryKeyName(tableName);
             return repository.DeleteRecord(tableName, pkName, id);
-        } 
+        }
         catch (Exception ex)
         {
             throw new Exception($"Ошибка при удалении: {ex.Message}");
         }
     }
 
+    // Сохранение записи: проверяем права на основе роли
     public bool SaveRecord(string tableName, Dictionary<string, string> values, int? id = null)
     {
-        if (UserSession.CurrentRole == "Гость")
+        if (!CanEdit(tableName))
         {
-           throw new Exception("У вас нет прав для изменения данных.");
+            throw new Exception("У вас нет прав для изменения данных этой таблицы.");
         }
 
         var data = values.ToDictionary(k => k.Key, v => (object)v.Value);
-
         string pkName = GetPrimaryKeyName(tableName);
 
-        if(id.HasValue)
+        if (id.HasValue)
         {
-            if (data.ContainsKey(pkName)) data.Remove(pkName); 
+            if (data.ContainsKey(pkName)) data.Remove(pkName);
             return repository.UpdateRecord(tableName, pkName, id.Value, data);
-        } else
+        }
+        else
         {
             if (data.ContainsKey(pkName)) data.Remove(pkName);
             return repository.InsertRecord(tableName, data);
-
         }
     }
 }
 
+
 // ===== BLL\UserSession.cs =====
+// Хранит данные текущего авторизованного пользователя
 public static class UserSession
 {
     public static string CurrentUserName { get; set; }
     public static string CurrentRole { get; set; }
 
+    // true если пользователь вошёл в систему
     public static bool IsLoggedIn => !string.IsNullOrEmpty(CurrentUserName);
 
+    // Сброс сессии при выходе
     public static void Logout()
     {
         CurrentUserName = null;
         CurrentRole = null;
-
     }
 }
+
 
 // ===== BLL\secure\PasswordHasher.cs =====
 using System.Security.Cryptography;
 using System.Text;
 
+// Хеширование паролей алгоритмом SHA-256
 public static class PasswordHasher
 {
+    // Принимает текстовый пароль, возвращает хеш-строку
     public static string Hash(string userTextPassword)
     {
-        using (SHA256 sha265 = SHA256.Create())
+        using (SHA256 sha256 = SHA256.Create())
         {
-            byte[] bytes = sha265.ComputeHash(Encoding.UTF8.GetBytes(userTextPassword));
+            byte[] bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(userTextPassword));
 
-            StringBuilder stringBuilder = new StringBuilder();
+            StringBuilder sb = new StringBuilder();
             for (int i = 0; i < bytes.Length; i++)
             {
-                stringBuilder.Append(bytes[i].ToString("x2"));
+                sb.Append(bytes[i].ToString("x2"));
             }
-            return stringBuilder.ToString();
+            return sb.ToString();
         }
     }
 }
+
 
 // ===== DAL\DataRepository.cs =====
 using System;
 using System.Data;
 using System.Data.OleDb;
 using System.Collections.Generic;
-    public class DataRepository
+
+public class DataRepository
+{
+    private readonly string connectionString;
+
+    // Конструктор принимает строку подключения к БД
+    public DataRepository(string connectionString)
     {
-        private readonly string connectionString;
+        this.connectionString = connectionString;
+    }
 
-        public DataRepository(string connectionString)
+    // Получение всех записей из указанной таблицы
+    public DataTable GetDataTable(string tableName)
+    {
+        DataTable dataTable = new DataTable();
+        string query = $"SELECT * FROM [{tableName}]";
+
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
         {
-            this.connectionString = connectionString;
-        }
-
-        // чтение
-        public DataTable GetDataTable(string tableName)
-        {
-            DataTable dataTable = new DataTable();
-
-            string query = $"SELECT * FROM [{tableName}]";
-
-            using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
             {
-                using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+                using (OleDbDataAdapter adapter = new OleDbDataAdapter(oleDbCommand))
                 {
-                    using (OleDbDataAdapter adapter = new OleDbDataAdapter(oleDbCommand))
-                    {
-                        try
-                        {
-                            adapter.Fill(dataTable);
-                        }
-                        catch (Exception ex)
-                        {
-                            throw new Exception($"Не удалось загрузить таблицу {tableName}: {ex.Message}", ex);
-                        }
-                    }
-                }
-            }
-            return dataTable;
-        }
-
-        // ==
-        public bool DeleteRecord(string tableName, string primaryKeyName, int recordId)
-        {
-            string query = $"DELETE FROM [{tableName}] WHERE [{primaryKeyName}] = ?";
-            
-            var parameters = new Dictionary<string, object>
-            {
-                { "id", recordId }
-            };
-
-            return ExecuteNonQuery(query, parameters);
-        }
-
-        // ==
-
-        public bool InsertRecord(string tableName, Dictionary<string, object> data)
-        {
-            string columns = "";
-            string values = "";
-            int count = 0;
-
-            foreach (var pair in data)
-            {
-                columns += "[" + pair.Key + "]";
-                values += "?";
-
-                if (count < data.Count - 1)
-                {
-                    columns += ", ";
-                    values += ", ";
-                }
-                
-                count++;
-            }
-
-            string query = "INSERT INTO [" + tableName + "] (" + columns + ") VALUES (" + values + ")";
-
-            return ExecuteNonQuery(query, data);
-        }
-
-        // == 
-        public bool UpdateRecord(string tableName, string pkName, int pkValue, Dictionary<string, object> data)
-        {
-    
-            string setClause = "";
-            int count = 0;
-
-            foreach (var key in data.Keys)
-            {
-                setClause += "[" + key + "] = ?";
-
-                // Если это не последний элемент, добавляем запятую
-                if (count < data.Count - 1)
-                {
-                    setClause += ", ";
-                }
-                count++;
-            }
-
-            // 2. Формируем SQL запрос через обычную склейку строк
-            string query = "UPDATE [" + tableName + "] SET " + setClause + " WHERE [" + pkName + "] = ?";
-
-            // 3. Готовим параметры. В SQL параметрах важен порядок.
-            // Сначала должны идти значения для SET, а в самом конце — значение для WHERE.
-            Dictionary<string, object> parameters = new Dictionary<string, object>();
-
-            // Копируем всё из data в новый словарь через цикл
-            foreach (var pair in data)
-            {
-                parameters.Add(pair.Key, pair.Value);
-            }
-
-            // Добавляем ID (первичный ключ) в самый конец
-            parameters.Add(pkName, pkValue);
-
-            // 4. Выполняем
-            return ExecuteNonQuery(query, parameters);
-        }
-
-        // ==
-        private bool ExecuteNonQuery(string query, Dictionary<string, object> parameters = null)
-        {
-            using (OleDbConnection connection = new OleDbConnection(connectionString))
-            {
-                using (OleDbCommand command = new OleDbCommand(query, connection))
-                {
-                    if (parameters != null)
-                    {
-                        foreach (var param in parameters)
-                        {
-                            command.Parameters.AddWithValue("?", param.Value ?? DBNull.Value);
-                        }
-                    }
-
                     try
                     {
-                        connection.Open();
-                        int rowsAffected = command.ExecuteNonQuery();
-                        return rowsAffected > 0;
+                        adapter.Fill(dataTable);
                     }
                     catch (Exception ex)
                     {
-                        throw new Exception($"Ошибка при записи в БД: {ex.Message}", ex);
+                        throw new Exception($"Не удалось загрузить таблицу {tableName}: {ex.Message}", ex);
                     }
                 }
             }
         }
-
-        // ==
-
-
+        return dataTable;
     }
 
+    // Удаление записи по первичному ключу
+    public bool DeleteRecord(string tableName, string primaryKeyName, int recordId)
+    {
+        string query = $"DELETE FROM [{tableName}] WHERE [{primaryKeyName}] = ?";
+
+        var parameters = new Dictionary<string, object>
+        {
+            { "id", recordId }
+        };
+
+        return ExecuteNonQuery(query, parameters);
+    }
+
+    // Вставка новой записи в таблицу
+    public bool InsertRecord(string tableName, Dictionary<string, object> data)
+    {
+        string columns = "";
+        string values = "";
+        int count = 0;
+
+        // Формируем списки столбцов и плейсхолдеров
+        foreach (var pair in data)
+        {
+            columns += "[" + pair.Key + "]";
+            values += "?";
+
+            if (count < data.Count - 1)
+            {
+                columns += ", ";
+                values += ", ";
+            }
+
+            count++;
+        }
+
+        string query = "INSERT INTO [" + tableName + "] (" + columns + ") VALUES (" + values + ")";
+
+        return ExecuteNonQuery(query, data);
+    }
+
+    // Обновление существующей записи по первичному ключу
+    public bool UpdateRecord(string tableName, string pkName, int pkValue, Dictionary<string, object> data)
+    {
+        string setClause = "";
+        int count = 0;
+
+        // Формируем SET часть запроса
+        foreach (var key in data.Keys)
+        {
+            setClause += "[" + key + "] = ?";
+
+            if (count < data.Count - 1)
+            {
+                setClause += ", ";
+            }
+            count++;
+        }
+
+        string query = "UPDATE [" + tableName + "] SET " + setClause + " WHERE [" + pkName + "] = ?";
+
+        // Порядок параметров важен: сначала SET значения, потом WHERE
+        Dictionary<string, object> parameters = new Dictionary<string, object>();
+
+        foreach (var pair in data)
+        {
+            parameters.Add(pair.Key, pair.Value);
+        }
+
+        // ID в конец — для WHERE условия
+        parameters.Add(pkName, pkValue);
+
+        return ExecuteNonQuery(query, parameters);
+    }
+
+    // Базовый метод выполнения INSERT/UPDATE/DELETE запросов
+    private bool ExecuteNonQuery(string query, Dictionary<string, object> parameters = null)
+    {
+        using (OleDbConnection connection = new OleDbConnection(connectionString))
+        {
+            using (OleDbCommand command = new OleDbCommand(query, connection))
+            {
+                // Добавляем параметры в порядке их следования в запросе
+                if (parameters != null)
+                {
+                    foreach (var param in parameters)
+                    {
+                        command.Parameters.AddWithValue("?", param.Value ?? DBNull.Value);
+                    }
+                }
+
+                try
+                {
+                    connection.Open();
+                    int rowsAffected = command.ExecuteNonQuery();
+                    return rowsAffected > 0;
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception($"Ошибка при записи в БД: {ex.Message}", ex);
+                }
+            }
+        }
+    }
+}
+
+
 // ===== DAL\DbManager.cs =====
-using System.Configuration;
 using System.Data.OleDb;
-using System.Linq.Expressions; 
 using System.IO;
 
+// Класс для работы с пользователями (авторизация, регистрация, смена пароля)
 public class DbManager
 {
     private readonly string connectionString;
@@ -407,21 +454,8 @@ public class DbManager
     {
         this.connectionString = connectionString;
     }
-    
-    // public bool TestConnection()
-    // {
-    //     using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
-    //     {
-    //         try
-    //         {
-    //             oleDbConnection.Open();
-    //             return true;
-    //         } catch (Exception)
-    //         {
-    //             return false;
-    //         }
-    //     } 
-    // }
+
+    // Загружает SQL-запрос из файла в папке DAL/Queries
     private string GetSqlQuery(string fileName)
     {
         string sqlFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DAL", "Queries");
@@ -429,19 +463,19 @@ public class DbManager
 
         if (!File.Exists(fullPath))
         {
-            throw new FileNotFoundException($"Файл запроса не найден. Проверьте наличие файла {fullPath}");
+            throw new FileNotFoundException($"Файл запроса не найден: {fullPath}");
         }
 
         return File.ReadAllText(fullPath);
     }
 
+    // Проверка логина и пароля, возвращает роль пользователя или null
     public string ValidateUser(string login, string password)
     {
         string query = GetSqlQuery("ValidateUser.sql");
 
         using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
         {
-        
             using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
             {
                 oleDbCommand.Parameters.AddWithValue("?", login);
@@ -454,25 +488,24 @@ public class DbManager
                     if (result != null)
                     {
                         return result.ToString();
-
                     }
-
-                } catch (Exception ex)
+                }
+                catch (Exception ex)
                 {
-                    throw new Exception("Ошибка при получении пользователя" + ex.Message);
-
+                    throw new Exception("Ошибка при проверке пользователя: " + ex.Message);
                 }
             }
-        } return null;
+        }
+        return null;
     }
 
+    // Создание нового пользователя в БД
     public bool CreateUser(string login, string hashedPassword, string role)
     {
         string query = GetSqlQuery("CreateUser.sql");
 
-          using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
         {
-        
             using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
             {
                 oleDbCommand.Parameters.AddWithValue("?", login);
@@ -483,19 +516,47 @@ public class DbManager
                 {
                     oleDbConnection.Open();
                     int rowsAffected = oleDbCommand.ExecuteNonQuery();
-                
-                   // Если добавлена хотя бы 1 строка, значит регистрация успешна
-                   return rowsAffected > 0; 
+                    return rowsAffected > 0;
                 }
                 catch (Exception ex)
-                                       {
-                // Сохраняем оригинальный StackTrace через inner exception
-                throw new Exception("Ошибка при создании нового пользователя", ex);
-                                       }
+                {
+                    throw new Exception("Ошибка при создании пользователя", ex);
+                }
+            }
+        }
+    }
+
+    // Смена пароля: проверяет старый пароль и заменяет на новый
+    public bool ChangePassword(string login, string oldHashedPassword, string newHashedPassword)
+    {
+        string query = GetSqlQuery("ChangePassword.sql");
+
+        using (OleDbConnection oleDbConnection = new OleDbConnection(connectionString))
+        {
+            using (OleDbCommand oleDbCommand = new OleDbCommand(query, oleDbConnection))
+            {
+                oleDbCommand.Parameters.AddWithValue("?", newHashedPassword);
+                oleDbCommand.Parameters.AddWithValue("?", login);
+                oleDbCommand.Parameters.AddWithValue("?", oldHashedPassword);
+
+                try
+                {
+                    oleDbConnection.Open();
+                    int rowsAffected = oleDbCommand.ExecuteNonQuery();
+                    return rowsAffected > 0;
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception("Ошибка при смене пароля", ex);
+                }
             }
         }
     }
 }
+
+
+// ===== DAL\Queries\ChangePassword.sql =====
+UPDATE Пользователи SET Пароль = ? WHERE Логин = ? AND Пароль = ?
 
 // ===== DAL\Queries\CreateUser.sql =====
 INSERT INTO Пользователи (Логин, Пароль, Роль) 
@@ -505,6 +566,91 @@ VALUES (?, ?, ?);
 SELECT Роль 
 FROM Пользователи 
 WHERE Логин = ? AND Пароль = ?
+
+// ===== Mb.Tests\AppTests.cs =====
+namespace Mb.Tests;
+
+// Модульные тесты для проверки ключевых компонентов системы
+public class AppTests
+{
+    // Тест 1: Хеширование пароля возвращает непустую строку
+    [Fact]
+    public void PasswordHasher_ReturnsHash()
+    {
+        string hash = PasswordHasher.Hash("test123");
+
+        Assert.False(string.IsNullOrEmpty(hash));
+    }
+
+    // Тест 2: Одинаковые пароли дают одинаковый хеш
+    [Fact]
+    public void PasswordHasher_SameInput_SameOutput()
+    {
+        string hash1 = PasswordHasher.Hash("myPassword");
+        string hash2 = PasswordHasher.Hash("myPassword");
+
+        Assert.Equal(hash1, hash2);
+    }
+
+    // Тест 3: Разные пароли дают разные хеши
+    [Fact]
+    public void PasswordHasher_DifferentInput_DifferentOutput()
+    {
+        string hash1 = PasswordHasher.Hash("password1");
+        string hash2 = PasswordHasher.Hash("password2");
+
+        Assert.NotEqual(hash1, hash2);
+    }
+
+    // Тест 4: UserSession по умолчанию — не авторизован
+    [Fact]
+    public void UserSession_ByDefault_NotLoggedIn()
+    {
+        UserSession.Logout(); // сброс
+
+        Assert.False(UserSession.IsLoggedIn);
+    }
+
+    // Тест 5: После установки имени — пользователь авторизован
+    [Fact]
+    public void UserSession_AfterLogin_IsLoggedIn()
+    {
+        UserSession.CurrentUserName = "admin";
+        UserSession.CurrentRole = "Администратор";
+
+        Assert.True(UserSession.IsLoggedIn);
+        Assert.Equal("admin", UserSession.CurrentUserName);
+        Assert.Equal("Администратор", UserSession.CurrentRole);
+
+        UserSession.Logout(); // чистим за собой
+    }
+
+    // Тест 6: После Logout — сессия сброшена
+    [Fact]
+    public void UserSession_AfterLogout_IsCleared()
+    {
+        UserSession.CurrentUserName = "user1";
+        UserSession.CurrentRole = "Гость";
+
+        UserSession.Logout();
+
+        Assert.False(UserSession.IsLoggedIn);
+        Assert.Null(UserSession.CurrentUserName);
+        Assert.Null(UserSession.CurrentRole);
+    }
+}
+
+
+// ===== Models\Roles.cs =====
+// Константы ролей пользователей системы
+public static class Roles
+{
+    public const string Admin = "Администратор";
+    public const string HeadDoctor = "Главврач";
+    public const string Employee = "Сотрудник";
+    public const string Guest = "Гость";
+}
+
 
 // ===== Models\User.cs =====
 public class User
@@ -640,6 +786,7 @@ partial class MainMenu
         pnlProfile.Name = "pnlProfile";
         pnlProfile.Size = new Size(340, 120);
         pnlProfile.TabIndex = 3;
+        pnlProfile.Click += pnlProfile_Click;
         // 
         // lblProfileDesc
         // 
@@ -651,6 +798,7 @@ partial class MainMenu
         lblProfileDesc.Name = "lblProfileDesc";
         lblProfileDesc.Size = new Size(307, 46);
         lblProfileDesc.TabIndex = 1;
+        lblProfileDesc.Click += pnlProfile_Click;
         lblProfileDesc.Text = "Вход в систему, управление учётной записью и персональными данными.";
         // 
         // lblProfileTitle
@@ -662,6 +810,7 @@ partial class MainMenu
         lblProfileTitle.Name = "lblProfileTitle";
         lblProfileTitle.Size = new Size(201, 31);
         lblProfileTitle.TabIndex = 0;
+        lblProfileTitle.Click += pnlProfile_Click;
         lblProfileTitle.Text = "Личный кабинет";
         // 
         // pnlReports
@@ -674,6 +823,7 @@ partial class MainMenu
         pnlReports.Name = "pnlReports";
         pnlReports.Size = new Size(340, 104);
         pnlReports.TabIndex = 4;
+        pnlReports.Click += pnlReports_Click;
         // 
         // lblReportsDesc
         // 
@@ -685,6 +835,7 @@ partial class MainMenu
         lblReportsDesc.Name = "lblReportsDesc";
         lblReportsDesc.Size = new Size(238, 46);
         lblReportsDesc.TabIndex = 1;
+        lblReportsDesc.Click += pnlReports_Click;
         lblReportsDesc.Text = "Сводная статистика по всем разделам системы.";
         // 
         // lblReportsTitle
@@ -696,6 +847,7 @@ partial class MainMenu
         lblReportsTitle.Name = "lblReportsTitle";
         lblReportsTitle.Size = new Size(96, 31);
         lblReportsTitle.TabIndex = 0;
+        lblReportsTitle.Click += pnlReports_Click;
         lblReportsTitle.Text = "Отчёты";
         // 
         // pnlAbout
@@ -708,6 +860,7 @@ partial class MainMenu
         pnlAbout.Name = "pnlAbout";
         pnlAbout.Size = new Size(340, 104);
         pnlAbout.TabIndex = 5;
+        pnlAbout.Click += pnlAbout_Click;
         // 
         // lblAboutDesc
         // 
@@ -719,6 +872,7 @@ partial class MainMenu
         lblAboutDesc.Name = "lblAboutDesc";
         lblAboutDesc.Size = new Size(302, 46);
         lblAboutDesc.TabIndex = 1;
+        lblAboutDesc.Click += pnlAbout_Click;
         lblAboutDesc.Text = "Информация о версии, технологиях и разработчиках.";
         // 
         // lblAboutTitle
@@ -730,6 +884,7 @@ partial class MainMenu
         lblAboutTitle.Name = "lblAboutTitle";
         lblAboutTitle.Size = new Size(162, 31);
         lblAboutTitle.TabIndex = 0;
+        lblAboutTitle.Click += pnlAbout_Click;
         lblAboutTitle.Text = "О программе";
         // 
         // btnExit
@@ -804,6 +959,7 @@ using Mb.UI.Database;
 
 namespace Mb;
 
+// Главное меню приложения — точка навигации между формами
 public partial class MainMenu : Form
 {
     private readonly IServiceProvider services;
@@ -813,26 +969,22 @@ public partial class MainMenu : Form
         this.services = services;
         InitializeComponent();
     }
+
+    // Открытие базы данных (с проверкой авторизации)
     private void pnlDatabase_Click(object sender, EventArgs e)
     {
-        // 1. Проверяем: если пользователь УЖЕ вошел в систему
         if (UserSession.IsLoggedIn)
         {
             OpenDataBaseForm();
-            return; // Ключевое слово return сразу прерывает метод. Всё, что ниже, выполняться не будет!
+            return;
         }
 
-        // 2. Если пользователь НЕ вошел — показываем предупреждение
-        MessageBox.Show("Для доступа необходимо войти в систему.", 
+        MessageBox.Show("Для доступа необходимо войти в систему.",
                         "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
-        // Достаем форму логина
         LoginForm loginForm = services.GetRequiredService<LoginForm>();
-
-        // Открываем её модально (ShowDialog)
         if (loginForm.ShowDialog() == DialogResult.OK)
         {
-            // Если вход успешный — открываем базу
             OpenDataBaseForm();
         }
     }
@@ -840,32 +992,74 @@ public partial class MainMenu : Form
     private void OpenDataBaseForm()
     {
         DatabaseForm databaseForm = services.GetRequiredService<DatabaseForm>();
-
         this.Hide();
         databaseForm.ShowDialog();
         this.Show();
     }
+
     private void btnExit_Click(object sender, EventArgs e)
     {
         Application.Exit();
+    }
+
+    // Личный кабинет (с проверкой авторизации)
+    private void pnlProfile_Click(object sender, EventArgs e)
+    {
+        if (UserSession.IsLoggedIn)
+        {
+            var profileForm = services.GetRequiredService<Mb.UI.Profile.ProfileForm>();
+            profileForm.ShowDialog();
+            return;
+        }
+
+        MessageBox.Show("Для доступа необходимо войти в систему.",
+                        "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+        var loginForm = services.GetRequiredService<Mb.UI.Login.LoginForm>();
+        if (loginForm.ShowDialog() == DialogResult.OK)
+        {
+            var profileForm = services.GetRequiredService<Mb.UI.Profile.ProfileForm>();
+            profileForm.ShowDialog();
+        }
+    }
+
+    // Отчёты (с проверкой авторизации)
+    private void pnlReports_Click(object sender, EventArgs e)
+    {
+        if (UserSession.IsLoggedIn)
+        {
+            var reportsForm = services.GetRequiredService<Mb.UI.Reports.ReportsForm>();
+            reportsForm.ShowDialog();
+            return;
+        }
+
+        MessageBox.Show("Для доступа необходимо войти в систему.",
+                        "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+        var loginForm = services.GetRequiredService<Mb.UI.Login.LoginForm>();
+        if (loginForm.ShowDialog() == DialogResult.OK)
+        {
+            var reportsForm = services.GetRequiredService<Mb.UI.Reports.ReportsForm>();
+            reportsForm.ShowDialog();
+        }
+    }
+
+    // О программе (доступно без авторизации)
+    private void pnlAbout_Click(object sender, EventArgs e)
+    {
+        var aboutForm = services.GetRequiredService<Mb.UI.About.AboutForm>();
+        aboutForm.ShowDialog();
     }
 }
 
 
 // ===== UI\About\AboutForm.Designer.cs =====
-﻿namespace Mb.UI.About
+namespace Mb.UI.About
 {
     partial class AboutForm
     {
-        /// <summary>
-        /// Required designer variable.
-        /// </summary>
         private System.ComponentModel.IContainer components = null;
 
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null))
@@ -877,33 +1071,111 @@ public partial class MainMenu : Form
 
         #region Windows Form Designer generated code
 
-        /// <summary>
-        /// Required method for Designer support - do not modify
-        /// the contents of this method with the code editor.
-        /// </summary>
         private void InitializeComponent()
         {
-            this.components = new System.ComponentModel.Container();
-            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(800, 450);
-            this.Text = "AboutForm";
+            pnlCard = new Panel();
+            lblTitle = new Label();
+            lblAuthor = new Label();
+            lblDescription = new Label();
+            btnHome = new Button();
+            pnlCard.SuspendLayout();
+            SuspendLayout();
+            // 
+            // pnlCard
+            // 
+            pnlCard.Anchor = AnchorStyles.None;
+            pnlCard.BackColor = Color.White;
+            pnlCard.BorderStyle = BorderStyle.FixedSingle;
+            pnlCard.Controls.Add(lblTitle);
+            pnlCard.Controls.Add(lblAuthor);
+            pnlCard.Controls.Add(lblDescription);
+            pnlCard.Controls.Add(btnHome);
+            pnlCard.Location = new Point(40, 30);
+            pnlCard.Name = "pnlCard";
+            pnlCard.Size = new Size(400, 340);
+            pnlCard.TabIndex = 0;
+            // 
+            // lblTitle
+            // 
+            lblTitle.Font = new Font("Segoe UI Light", 20F);
+            lblTitle.ForeColor = Color.FromArgb(46, 74, 107);
+            lblTitle.Location = new Point(20, 20);
+            lblTitle.Name = "lblTitle";
+            lblTitle.Size = new Size(360, 42);
+            lblTitle.TabIndex = 0;
+            lblTitle.Text = "О программе";
+            lblTitle.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // lblAuthor
+            // 
+            lblAuthor.Font = new Font("Segoe UI Semibold", 10.5F);
+            lblAuthor.ForeColor = Color.FromArgb(44, 62, 80);
+            lblAuthor.Location = new Point(20, 80);
+            lblAuthor.Name = "lblAuthor";
+            lblAuthor.Size = new Size(360, 50);
+            lblAuthor.TabIndex = 1;
+            lblAuthor.Text = "Студент 1 курса\r\nГруппа: Б.ПИН.ИИ\r\nГруздев Андрей";
+            lblAuthor.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // lblDescription
+            // 
+            lblDescription.Font = new Font("Segoe UI", 9.75F);
+            lblDescription.ForeColor = Color.FromArgb(108, 117, 125);
+            lblDescription.Location = new Point(20, 150);
+            lblDescription.Name = "lblDescription";
+            lblDescription.Size = new Size(360, 120);
+            lblDescription.TabIndex = 2;
+            lblDescription.Text = "Информационная система управления данными больничной сети. " +
+                "Приложение позволяет просматривать, добавлять, редактировать и удалять " +
+                "записи о больницах, отделениях и врачах. Реализовано разграничение прав " +
+                "доступа, формирование отчётов и экспорт данных.";
+            lblDescription.TextAlign = ContentAlignment.TopCenter;
+            // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(125, 285);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(150, 36);
+            btnHome.TabIndex = 3;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += (s, e) => this.Close();
+            // 
+            // AboutForm
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            BackColor = Color.FromArgb(244, 246, 250);
+            ClientSize = new Size(480, 400);
+            Controls.Add(pnlCard);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Name = "AboutForm";
+            StartPosition = FormStartPosition.CenterScreen;
+            Text = "О программе";
+            pnlCard.ResumeLayout(false);
+            ResumeLayout(false);
         }
 
         #endregion
+
+        private Panel pnlCard;
+        private Label lblTitle;
+        private Label lblAuthor;
+        private Label lblDescription;
+        private Button btnHome;
     }
 }
 
-// ===== UI\About\AboutForm.cs =====
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
 
+// ===== UI\About\AboutForm.cs =====
 namespace Mb.UI.About
 {
     public partial class AboutForm : Form
@@ -1186,14 +1458,14 @@ namespace Mb.UI.About
 
 
 // ===== UI\Database\DatabaseForm.cs =====
-﻿using System;
+using System;
 using System.Data;
-using System.Linq; // Для работы Cast и Select (лямбда-выражения)
-using System.Runtime.InteropServices;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace Mb.UI.Database
 {
+    // Форма для работы с таблицами БД (просмотр, CRUD, поиск)
     public partial class DatabaseForm : Form
     {
         private readonly DataService dataService;
@@ -1201,74 +1473,78 @@ namespace Mb.UI.Database
         public DatabaseForm(DataService dataService)
         {
             InitializeComponent();
-            this.dataService = dataService;
 
+            // Показываем кнопки редактирования только для ролей с правами
+            this.Load += (s, e) => {
+                string role = UserSession.CurrentRole;
+                bool canEdit = (role == Roles.Admin || role == Roles.HeadDoctor);
+                bool canDelete = (role == Roles.Admin);
+                btnAdd.Visible = canEdit;
+                btnEdit.Visible = canEdit;
+                btnDelete.Visible = canDelete;
+            };
+
+            this.dataService = dataService;
             cmbTables.SelectedIndex = 0;
         }
 
+        // Загрузка данных выбранной таблицы в DataGridView
         private void LoadData()
         {
-
             if (cmbTables.SelectedItem == null) return;
             string tableName = cmbTables.SelectedItem.ToString();
 
             try
             {
                 DataTable table = dataService.GetTable(tableName);
-
                 dgvData.DataSource = table;
             }
             catch (Exception ex)
             {
-                MessageBox.Show("ОШИБКА БАЗЫ: " + ex.Message);
+                MessageBox.Show("Ошибка загрузки: " + ex.Message);
             }
         }
+
         private void cmbTables_SelectedIndexChanged(object sender, EventArgs e) => LoadData();
-
         private void btnRefresh_Click(object sender, EventArgs e) => LoadData();
-
         private void btnHome_Click(object sender, EventArgs e) => this.Close();
+        private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
 
-        private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e)
-        {
-
-        }
-
+        // Удаление выбранной записи с подтверждением
         private void btnDelete_Click(object sender, EventArgs e)
         {
-            if (dgvData.CurrentRow != null)
+            if (dgvData.CurrentRow == null)
             {
-                try
+                MessageBox.Show("Выберите запись для удаления.");
+                return;
+            }
+
+            try
+            {
+                int id = Convert.ToInt32(dgvData.CurrentRow.Cells[0].Value);
+                string tableName = cmbTables.SelectedItem.ToString();
+
+                var result = MessageBox.Show(
+                    $"Удалить запись с ID {id} из таблицы {tableName}?",
+                    "Подтверждение", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
                 {
-                    int id = Convert.ToInt32(dgvData.CurrentRow.Cells[0].Value);
-
-                    string tableName = cmbTables.SelectedItem.ToString();
-
-                    var result = MessageBox.Show($"Вы уверены, что хотите удалить запись с ID {id} из таблицы {tableName}?",
-                                         "Подтверждение", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-
-                    if (result == DialogResult.Yes)
+                    bool isDeleted = dataService.DataRecord(tableName, id);
+                    if (isDeleted)
                     {
-                        bool isDeleted = dataService.DataRecord(tableName, id);
-
-                        if (isDeleted)
-                        {
-                            MessageBox.Show("Запись удалена!");
-                            LoadData();
-                        }
+                        MessageBox.Show("Запись удалена!");
+                        LoadData();
                     }
                 }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
             }
-            else
+            catch (Exception ex)
             {
-                MessageBox.Show("Пожалуйста, заполните ячейку");
+                MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
+        // Добавление новой записи через форму редактирования
         private void btnAdd_Click(object sender, EventArgs e)
         {
             string tableName = cmbTables.SelectedItem.ToString();
@@ -1291,17 +1567,15 @@ namespace Mb.UI.Database
                 }
             }
         }
+
+        // Редактирование выбранной записи
         private void btnEdit_Click(object sender, EventArgs e)
         {
-            if (dgvData.CurrentRow == null)
-            {
-                return;
-            }
+            if (dgvData.CurrentRow == null) return;
 
             string tableName = cmbTables.SelectedItem.ToString();
             int id = Convert.ToInt32(dgvData.CurrentRow.Cells[0].Value);
 
-            // Собираем данные из выбранной строки
             var fields = dgvData.Columns.Cast<DataGridViewColumn>()
                 .ToDictionary(c => c.Name, c => dgvData.CurrentRow.Cells[c.Index].Value?.ToString());
 
@@ -1321,6 +1595,7 @@ namespace Mb.UI.Database
             }
         }
 
+        // Поиск по второму столбцу таблицы (фильтрация на месте)
         private void txtSearch_TextChanged(object sender, EventArgs e)
         {
             if (dgvData.DataSource is DataTable dt)
@@ -1331,6 +1606,7 @@ namespace Mb.UI.Database
         }
     }
 }
+
 
 // ===== UI\Database\EditRecordForm.Designer.cs =====
 ﻿namespace Mb.UI.Database
@@ -1571,6 +1847,7 @@ namespace Mb.UI.Database
             pnlCard = new Panel();
             lnkRegister = new LinkLabel();
             btnLogin = new Button();
+            btnHome = new Button();
             txtPassword = new TextBox();
             lblPassword = new Label();
             txtLogin = new TextBox();
@@ -1587,6 +1864,7 @@ namespace Mb.UI.Database
             pnlCard.BorderStyle = BorderStyle.FixedSingle;
             pnlCard.Controls.Add(lnkRegister);
             pnlCard.Controls.Add(btnLogin);
+            pnlCard.Controls.Add(btnHome);
             pnlCard.Controls.Add(txtPassword);
             pnlCard.Controls.Add(lblPassword);
             pnlCard.Controls.Add(txtLogin);
@@ -1695,6 +1973,22 @@ namespace Mb.UI.Database
             lblTitle.Text = "Авторизация";
             lblTitle.TextAlign = ContentAlignment.MiddleCenter;
             // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(107, 390);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(150, 36);
+            btnHome.TabIndex = 10;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += (s, e) => this.Close();
+            // 
             // LoginForm
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
@@ -1723,6 +2017,7 @@ namespace Mb.UI.Database
         private Label lblPassword;
         private TextBox txtPassword;
         private Button btnLogin;
+        private Button btnHome;
         private LinkLabel lnkRegister;
     }
 }
@@ -2015,14 +2310,93 @@ namespace Mb.UI.Login
 
 
 // ===== UI\Profile\ProfileForm.cs =====
-﻿namespace Mb.UI.Profile
+namespace Mb.UI.Profile
 {
     public partial class ProfileForm : Form
     {
-        public ProfileForm()
+        private readonly AuthService authService;
+
+        public ProfileForm(AuthService authService)
         {
+            this.authService = authService;
             InitializeComponent();
+            this.Load += ProfileForm_Load;
+            btnLogout.Click += btnLogout_Click;
+            btnHome.Click += btnHome_Click;
+            btnChangePassword.Click += btnChangePassword_Click;
         }
+
+        private void ProfileForm_Load(object sender, EventArgs e)
+        {
+            lblEmailValue.Text = UserSession.CurrentUserName;
+            lblRoleValue.Text = UserSession.CurrentRole;
+        }
+
+        private void btnChangePassword_Click(object sender, EventArgs e)
+        {
+            // Простая форма ввода через InputBox-подход (3 текстовых поля в отдельной форме)
+            using var dialog = new Form();
+            dialog.Text = "Смена пароля";
+            dialog.Size = new Size(350, 250);
+            dialog.StartPosition = FormStartPosition.CenterParent;
+            dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+            dialog.MaximizeBox = false;
+            dialog.MinimizeBox = false;
+
+            var lblOld = new Label { Text = "Текущий пароль:", Location = new Point(20, 20), AutoSize = true };
+            var txtOld = new TextBox { Location = new Point(20, 45), Size = new Size(290, 28), UseSystemPasswordChar = true };
+            var lblNew = new Label { Text = "Новый пароль:", Location = new Point(20, 80), AutoSize = true };
+            var txtNew = new TextBox { Location = new Point(20, 105), Size = new Size(290, 28), UseSystemPasswordChar = true };
+            var btnOk = new Button { Text = "Сменить", Location = new Point(20, 150), Size = new Size(130, 36), DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "Отмена", Location = new Point(180, 150), Size = new Size(130, 36), DialogResult = DialogResult.Cancel };
+
+            dialog.Controls.AddRange(new Control[] { lblOld, txtOld, lblNew, txtNew, btnOk, btnCancel });
+            dialog.AcceptButton = btnOk;
+            dialog.CancelButton = btnCancel;
+
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                string oldPass = txtOld.Text.Trim();
+                string newPass = txtNew.Text.Trim();
+
+                if (string.IsNullOrEmpty(oldPass) || string.IsNullOrEmpty(newPass))
+                {
+                    MessageBox.Show("Заполните все поля.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (newPass.Length < 6)
+                {
+                    MessageBox.Show("Новый пароль должен быть не менее 6 символов.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                try
+                {
+                    bool success = authService.ChangePassword(oldPass, newPass);
+                    if (success)
+                    {
+                        MessageBox.Show("Пароль успешно изменён.", "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    else
+                    {
+                        MessageBox.Show("Неверный текущий пароль.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Ошибка: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void btnLogout_Click(object sender, EventArgs e)
+        {
+            UserSession.Logout();
+            Application.Restart();
+        }
+
+        private void btnHome_Click(object sender, EventArgs e) => this.Close();
     }
 }
 
@@ -2061,6 +2435,7 @@ namespace Mb.UI.Login
             pnlCard = new Panel();
             lnkLogin = new LinkLabel();
             btnRegister = new Button();
+            btnHome = new Button();
             txtConfirm = new TextBox();
             lblConfirm = new Label();
             txtPassword = new TextBox();
@@ -2079,6 +2454,7 @@ namespace Mb.UI.Login
             pnlCard.BorderStyle = BorderStyle.FixedSingle;
             pnlCard.Controls.Add(lnkLogin);
             pnlCard.Controls.Add(btnRegister);
+            pnlCard.Controls.Add(btnHome);
             pnlCard.Controls.Add(txtConfirm);
             pnlCard.Controls.Add(lblConfirm);
             pnlCard.Controls.Add(txtPassword);
@@ -2210,6 +2586,22 @@ namespace Mb.UI.Login
             lblTitle.Text = "Регистрация";
             lblTitle.TextAlign = ContentAlignment.MiddleCenter;
             // 
+            // btnHome
+            // 
+            btnHome.BackColor = Color.White;
+            btnHome.Cursor = Cursors.Hand;
+            btnHome.FlatAppearance.BorderColor = Color.FromArgb(206, 212, 218);
+            btnHome.FlatStyle = FlatStyle.Flat;
+            btnHome.Font = new Font("Segoe UI", 9.75F);
+            btnHome.ForeColor = Color.FromArgb(108, 117, 125);
+            btnHome.Location = new Point(107, 470);
+            btnHome.Name = "btnHome";
+            btnHome.Size = new Size(150, 36);
+            btnHome.TabIndex = 10;
+            btnHome.Text = "← На главную";
+            btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += (s, e) => this.Close();
+            // 
             // RegisterForm
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
@@ -2240,6 +2632,7 @@ namespace Mb.UI.Login
         private Label lblConfirm;
         private TextBox txtConfirm;
         private Button btnRegister;
+        private Button btnHome;
         private LinkLabel lnkLogin;
     }
 }
@@ -2286,7 +2679,7 @@ namespace Mb.UI.Register
 
             try
             {
-                bool isSuccess = authService.Register(email, password, "Гость");
+                bool isSuccess = authService.Register(email, password, Roles.Guest);
                 
                 if (isSuccess)
                 {
@@ -2415,7 +2808,7 @@ namespace Mb.UI.Register
             lstReports.ForeColor = Color.FromArgb(44, 62, 80);
             lstReports.IntegralHeight = false;
             lstReports.ItemHeight = 30;
-            lstReports.Items.AddRange(new object[] { "Все пользователи", "Пользователи по ролям", "Сводная статистика" });
+            lstReports.Items.AddRange(new object[] { "Врачи по отделениям", "Отделения по больницам", "Свободные места" });
             lstReports.Name = "lstReports";
             lstReports.Size = new Size(260, 534);
             lstReports.TabIndex = 1;
@@ -2573,14 +2966,166 @@ namespace Mb.UI.Register
 
 
 // ===== UI\Reports\ReportsForm.cs =====
-﻿namespace Mb.UI.Reports
+using System;
+using System.Data;
+using System.Data.OleDb;
+using System.IO;
+using System.Text;
+using System.Windows.Forms;
+using System.Configuration;
+
+namespace Mb.UI.Reports
 {
     public partial class ReportsForm : Form
     {
+        private readonly string connectionString;
+
         public ReportsForm()
         {
             InitializeComponent();
+
+            // Получаем строку подключения из конфигурации
+            connectionString = ConfigurationManager.ConnectionStrings["HospitalDB"].ConnectionString;
+
+            // Привязываем события кнопок
+            btnGenerate.Click += btnGenerate_Click;
+            btnExport.Click += btnExport_Click;
+            btnHome.Click += btnHome_Click;
         }
+
+        // Кнопка "Сформировать" — выполняет выбранный отчёт
+        private void btnGenerate_Click(object sender, EventArgs e)
+        {
+            if (lstReports.SelectedItem == null)
+            {
+                MessageBox.Show("Выберите отчёт из списка.", "Предупреждение",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string reportName = lstReports.SelectedItem.ToString();
+
+            try
+            {
+                DataTable result = GetReportData(reportName);
+                dgvReport.DataSource = result;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка при формировании отчёта: " + ex.Message,
+                    "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Получение данных отчёта по имени
+        private DataTable GetReportData(string reportName)
+        {
+            string query = "";
+
+            switch (reportName)
+            {
+                case "Врачи по отделениям":
+                    query = "SELECT В.ФИО_врача, В.Должность, В.Специальность, О.Название_отделения " +
+                            "FROM Врачи AS В INNER JOIN Отделения AS О ON В.Код_отделения = О.Код_отделения " +
+                            "ORDER BY О.Название_отделения, В.ФИО_врача";
+                    break;
+
+                case "Отделения по больницам":
+                    query = "SELECT О.Название_отделения, О.Число_мест, О.Число_свободных_мест, Б.Адрес " +
+                            "FROM Отделения AS О INNER JOIN Больницы AS Б ON О.Номер_больницы = Б.Номер_больницы " +
+                            "ORDER BY Б.Адрес, О.Название_отделения";
+                    break;
+
+                case "Свободные места":
+                    query = "SELECT О.Название_отделения, О.Число_свободных_мест, Б.Адрес " +
+                            "FROM Отделения AS О INNER JOIN Больницы AS Б ON О.Номер_больницы = Б.Номер_больницы " +
+                            "WHERE О.Число_свободных_мест > 0 " +
+                            "ORDER BY О.Число_свободных_мест DESC";
+                    break;
+
+                default:
+                    throw new Exception("Неизвестный отчёт: " + reportName);
+            }
+
+            return ExecuteQuery(query);
+        }
+
+        // Выполнение SQL-запроса и возврат таблицы
+        private DataTable ExecuteQuery(string query)
+        {
+            DataTable table = new DataTable();
+
+            using (OleDbConnection connection = new OleDbConnection(connectionString))
+            {
+                using (OleDbCommand command = new OleDbCommand(query, connection))
+                {
+                    using (OleDbDataAdapter adapter = new OleDbDataAdapter(command))
+                    {
+                        adapter.Fill(table);
+                    }
+                }
+            }
+
+            return table;
+        }
+
+        // Экспорт данных из DataGridView в CSV-файл
+        private void btnExport_Click(object sender, EventArgs e)
+        {
+            if (dgvReport.DataSource == null || dgvReport.Rows.Count == 0)
+            {
+                MessageBox.Show("Сначала сформируйте отчёт.", "Предупреждение",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Диалог сохранения файла
+            SaveFileDialog saveDialog = new SaveFileDialog();
+            saveDialog.Filter = "CSV файл (*.csv)|*.csv";
+            saveDialog.FileName = "Отчёт_" + DateTime.Now.ToString("yyyy-MM-dd");
+
+            if (saveDialog.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    StringBuilder sb = new StringBuilder();
+
+                    // Заголовки столбцов
+                    for (int i = 0; i < dgvReport.Columns.Count; i++)
+                    {
+                        sb.Append(dgvReport.Columns[i].HeaderText);
+                        if (i < dgvReport.Columns.Count - 1)
+                            sb.Append(";");
+                    }
+                    sb.AppendLine();
+
+                    // Данные строк
+                    for (int row = 0; row < dgvReport.Rows.Count; row++)
+                    {
+                        for (int col = 0; col < dgvReport.Columns.Count; col++)
+                        {
+                            object value = dgvReport.Rows[row].Cells[col].Value;
+                            sb.Append(value != null ? value.ToString() : "");
+                            if (col < dgvReport.Columns.Count - 1)
+                                sb.Append(";");
+                        }
+                        sb.AppendLine();
+                    }
+
+                    File.WriteAllText(saveDialog.FileName, sb.ToString(), Encoding.UTF8);
+                    MessageBox.Show("Отчёт сохранён: " + saveDialog.FileName, "Успех",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Ошибка при сохранении: " + ex.Message,
+                        "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        // Кнопка "На главную"
+        private void btnHome_Click(object sender, EventArgs e) => this.Close();
     }
 }
 
