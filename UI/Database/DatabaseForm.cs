@@ -136,7 +136,9 @@ namespace Mb.UI.Database
             if (dgvData.DataSource is DataTable dt)
             {
                 string filterColumn = dt.Columns[1].ColumnName;
-                dt.DefaultView.RowFilter = $"[{filterColumn}] LIKE '%{txtSearch.Text}%'";
+                // Экранируем одинарную кавычку, чтобы пользователь не сломал фильтр (защита от инъекции)
+                string safeText = txtSearch.Text.Replace("'", "''");
+                dt.DefaultView.RowFilter = $"[{filterColumn}] LIKE '%{safeText}%'";
             }
         }
 

@@ -162,6 +162,7 @@
             btnHome.TabIndex = 4;
             btnHome.Text = "На главную";
             btnHome.UseVisualStyleBackColor = false;
+            btnHome.Click += btnHome_Click;
             // 
             // btnRefresh
             // 
@@ -177,6 +178,7 @@
             btnRefresh.TabIndex = 3;
             btnRefresh.Text = "Обновить";
             btnRefresh.UseVisualStyleBackColor = false;
+            btnRefresh.Click += btnRefresh_Click;
             // 
             // btnDelete
             // 

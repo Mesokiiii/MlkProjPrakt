@@ -2,7 +2,7 @@ using System.Data.OleDb;
 using System.IO;
 
 // Класс для работы с пользователями (авторизация, регистрация, смена пароля)
-public class DbManager
+public class DbManager : IDbManager
 {
     private readonly string connectionString;
 

@@ -45,7 +45,7 @@ static class Program
     {
         string connectionString = ConfigurationManager.ConnectionStrings["HospitalDB"].ConnectionString;
 
-        services.AddSingleton(new DbManager(connectionString));
+        services.AddSingleton<IDbManager>(new DbManager(connectionString));
         services.AddSingleton(new DataRepository(connectionString));
         
         services.AddSingleton<DataService>();

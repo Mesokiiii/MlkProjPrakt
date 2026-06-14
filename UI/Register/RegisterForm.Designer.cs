@@ -36,8 +36,8 @@
             lblConfirm = new Label();
             txtPassword = new TextBox();
             lblPassword = new Label();
-            txtEmail = new TextBox();
-            lblEmail = new Label();
+            txtLogin = new TextBox();
+            lblLogin = new Label();
             lblSubtitle = new Label();
             lblTitle = new Label();
             pnlCard.SuspendLayout();
@@ -55,8 +55,8 @@
             pnlCard.Controls.Add(lblConfirm);
             pnlCard.Controls.Add(txtPassword);
             pnlCard.Controls.Add(lblPassword);
-            pnlCard.Controls.Add(txtEmail);
-            pnlCard.Controls.Add(lblEmail);
+            pnlCard.Controls.Add(txtLogin);
+            pnlCard.Controls.Add(lblLogin);
             pnlCard.Controls.Add(lblSubtitle);
             pnlCard.Controls.Add(lblTitle);
             pnlCard.Location = new Point(30, 45);
@@ -139,26 +139,26 @@
             lblPassword.TabIndex = 4;
             lblPassword.Text = "Пароль";
             // 
-            // txtEmail
+            // txtLogin
             // 
-            txtEmail.BorderStyle = BorderStyle.FixedSingle;
-            txtEmail.Font = new Font("Segoe UI", 11F);
-            txtEmail.Location = new Point(36, 170);
-            txtEmail.Name = "txtEmail";
-            txtEmail.PlaceholderText = "Введите email";
-            txtEmail.Size = new Size(288, 32);
-            txtEmail.TabIndex = 3;
+            txtLogin.BorderStyle = BorderStyle.FixedSingle;
+            txtLogin.Font = new Font("Segoe UI", 11F);
+            txtLogin.Location = new Point(36, 170);
+            txtLogin.Name = "txtLogin";
+            txtLogin.PlaceholderText = "Введите логин";
+            txtLogin.Size = new Size(288, 32);
+            txtLogin.TabIndex = 3;
             // 
-            // lblEmail
+            // lblLogin
             // 
-            lblEmail.AutoSize = true;
-            lblEmail.Font = new Font("Segoe UI", 9.75F);
-            lblEmail.ForeColor = Color.FromArgb(108, 117, 125);
-            lblEmail.Location = new Point(34, 146);
-            lblEmail.Name = "lblEmail";
-            lblEmail.Size = new Size(51, 23);
-            lblEmail.TabIndex = 2;
-            lblEmail.Text = "Email";
+            lblLogin.AutoSize = true;
+            lblLogin.Font = new Font("Segoe UI", 9.75F);
+            lblLogin.ForeColor = Color.FromArgb(108, 117, 125);
+            lblLogin.Location = new Point(34, 146);
+            lblLogin.Name = "lblLogin";
+            lblLogin.Size = new Size(51, 23);
+            lblLogin.TabIndex = 2;
+            lblLogin.Text = "Логин";
             // 
             // lblSubtitle
             // 
@@ -221,8 +221,8 @@
         private Panel pnlCard;
         private Label lblTitle;
         private Label lblSubtitle;
-        private Label lblEmail;
-        private TextBox txtEmail;
+        private Label lblLogin;
+        private TextBox txtLogin;
         private Label lblPassword;
         private TextBox txtPassword;
         private Label lblConfirm;

@@ -3,11 +3,11 @@ using System;
 // Сервис авторизации: вход, регистрация, выход, смена пароля
 public class AuthService
 {
-    private readonly DbManager db;
+    private readonly IDbManager db;
     private int failedAttempts = 0;
     private DateTime? lockoutEndTime = null;
 
-    public AuthService(DbManager db)
+    public AuthService(IDbManager db)
     {
         this.db = db;
     }
@@ -20,10 +20,10 @@ public class AuthService
         {
             if (DateTime.Now < lockoutEndTime.Value)
             {
-                int remainingMinutes = (int)(lockoutEndTime.Value - DateTime.Now).TotalMinutes;
-                if (remainingMinutes <= 0) remainingMinutes = 1;
-
-                throw new Exception($"Система заблокирована. Попробуйте через {remainingMinutes} минут.");
+                // Считаем, сколько минут осталось до конца блокировки
+                TimeSpan timeLeft = lockoutEndTime.Value - DateTime.Now; // разница между временем окончания и текущим временем
+                int minutesLeft = timeLeft.Minutes + 1; // берём минуты из разницы и +1 для округления вверх
+                throw new Exception("Система заблокирована. Попробуйте через " + minutesLeft + " минут.");
             }
             else
             {
