@@ -80,8 +80,18 @@ namespace Mb.UI.Profile
 
         private void btnLogout_Click(object sender, EventArgs e)
         {
-            UserSession.Logout();
-            Application.Restart();
+            var result = MessageBox.Show(
+                "Вы уверены, что хотите выйти из системы?",
+                "Подтверждение выхода",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result == DialogResult.Yes)
+            {
+                UserSession.Logout();
+                MessageBox.Show("Вы успешно вышли из системы.", "Выход", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                this.Close(); // Просто закрываем форму профиля и возвращаемся в главное меню 
+            }
         }
 
         private void btnHome_Click(object sender, EventArgs e) => this.Close();
