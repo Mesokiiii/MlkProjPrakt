@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Windows.Forms;
 using System.Configuration;
+using ClosedXML.Excel;
 
 namespace Mb.UI.Reports
 {
@@ -101,7 +102,7 @@ namespace Mb.UI.Reports
             return table;
         }
 
-        // Экспорт данных из DataGridView в CSV-файл
+        // Экспорт отчёта в Excel
         private void btnExport_Click(object sender, EventArgs e)
         {
             if (dgvReport.DataSource == null || dgvReport.Rows.Count == 0)
@@ -113,39 +114,44 @@ namespace Mb.UI.Reports
 
             // Диалог сохранения файла
             SaveFileDialog saveDialog = new SaveFileDialog();
-            saveDialog.Filter = "CSV файл (*.csv)|*.csv";
-            saveDialog.FileName = "Отчёт_" + DateTime.Now.ToString("yyyy-MM-dd");
+            saveDialog.Filter = "Excel файлы (*.xlsx)|*.xlsx";
+            saveDialog.FileName = $"Отчёт_{DateTime.Now:dd-MM-yyyy}.xlsx";
 
             if (saveDialog.ShowDialog() == DialogResult.OK)
             {
                 try
                 {
-                    StringBuilder sb = new StringBuilder();
+                    // Создаём новую книгу Excel
+                    var workbook = new XLWorkbook();
+                    var worksheet = workbook.Worksheets.Add("Отчёт");
 
-                    // Заголовки столбцов
+                    // Записываем заголовки столбцов
                     for (int i = 0; i < dgvReport.Columns.Count; i++)
                     {
-                        sb.Append(dgvReport.Columns[i].HeaderText);
-                        if (i < dgvReport.Columns.Count - 1)
-                            sb.Append(";");
+                        // Берём название столбца
+                        worksheet.Cell(1, i + 1).Value = dgvReport.Columns[i].HeaderText;
+                        // Делаем заголовок жирным
+                        worksheet.Cell(1, i + 1).Style.Font.Bold = true;
                     }
-                    sb.AppendLine();
 
-                    // Данные строк
-                    for (int row = 0; row < dgvReport.Rows.Count; row++)
+                    // Записываем данные построчно
+                    int excelRow = 2;
+                    foreach (DataGridViewRow row in dgvReport.Rows)
                     {
+                        if (row.IsNewRow) continue;
+
                         for (int col = 0; col < dgvReport.Columns.Count; col++)
                         {
-                            object value = dgvReport.Rows[row].Cells[col].Value;
-                            sb.Append(value != null ? value.ToString() : "");
-                            if (col < dgvReport.Columns.Count - 1)
-                                sb.Append(";");
+                            var value = row.Cells[col].Value;
+                            worksheet.Cell(excelRow, col + 1).Value = value?.ToString() ?? "";
                         }
-                        sb.AppendLine();
+                        excelRow++;
                     }
 
-                    File.WriteAllText(saveDialog.FileName, sb.ToString(), Encoding.UTF8);
-                    MessageBox.Show("Отчёт сохранён: " + saveDialog.FileName, "Успех",
+                    // Сохраняем файл
+                    workbook.SaveAs(saveDialog.FileName);
+
+                    MessageBox.Show("Отчёт успешно сохранён!", "Успех",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)

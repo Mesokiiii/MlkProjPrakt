@@ -2,7 +2,6 @@ using System;
 using System.Data;
 using System.Linq;
 using System.Windows.Forms;
-using ClosedXML.Excel;
 
 namespace Mb.UI.Database
 {
@@ -147,68 +146,5 @@ namespace Mb.UI.Database
         private void btnRefresh_Click(object sender, EventArgs e) => LoadData();
         private void btnHome_Click(object sender, EventArgs e) => this.Close();
         private void dgvData_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
-
-        // Экспорт данных в Excel
-        private void btnExportExcel_Click(object sender, EventArgs e)
-        {
-            // Проверяем, есть ли данные
-            if (dgvData.Rows.Count == 0)
-            {
-                MessageBox.Show("Нет данных для экспорта.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            // Диалог сохранения файла
-            SaveFileDialog saveDialog = new SaveFileDialog();
-            saveDialog.Filter = "Excel файлы (*.xlsx)|*.xlsx";
-            saveDialog.FileName = $"Отчёт_{DateTime.Now:dd-MM-yyyy}.xlsx";
-
-            if (saveDialog.ShowDialog() == DialogResult.OK)
-            {
-                try
-                {
-                    // Создаём новую книгу Excel
-                    var workbook = new XLWorkbook();
-                    var worksheet = workbook.Worksheets.Add("Данные");
-
-                    // Записываем заголовки столбцов
-                    for (int i = 0; i < dgvData.Columns.Count; i++)
-                    {
-                        // Берём название столбца и записываем в первую строку Excel
-                        worksheet.Cell(1, i + 1).Value = dgvData.Columns[i].HeaderText;
-                        
-                        // Делаем текст заголовка жирным (для красоты)
-                        worksheet.Cell(1, i + 1).Style.Font.Bold = true;
-                    }
-
-                    // Записываем данные построчно
-                    int excelRow = 2; // Начинаем со второй строки (т.к. первая - это заголовки)
-                    foreach (DataGridViewRow row in dgvData.Rows)
-                    {
-                        if (row.IsNewRow) continue; // Пропускаем пустую строку
-
-                        // Проходим по каждому столбцу текущей строки
-                        for (int col = 0; col < dgvData.Columns.Count; col++)
-                        {
-                            // Берём значение из ячейки DataGridView
-                            var value = row.Cells[col].Value;
-                            
-                            // Записываем значение в ячейку Excel (строка excelRow, столбец col+1)
-                            worksheet.Cell(excelRow, col + 1).Value = value?.ToString() ?? "";
-                        }
-                        excelRow++; // Переходим к следующей строке
-                    }
-
-                    // Сохраняем файл
-                    workbook.SaveAs(saveDialog.FileName);
-
-                    MessageBox.Show("Отчёт успешно сохранён!", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("Ошибка: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
     }
 }

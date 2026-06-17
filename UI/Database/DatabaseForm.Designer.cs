@@ -136,7 +136,6 @@
             // 
             pnlFooter.BackColor = Color.White;
             pnlFooter.Controls.Add(btnHome);
-            pnlFooter.Controls.Add(btnExportExcel);
             pnlFooter.Controls.Add(btnRefresh);
             pnlFooter.Controls.Add(btnDelete);
             pnlFooter.Controls.Add(btnEdit);
@@ -160,26 +159,10 @@
             btnHome.Location = new Point(1104, 19);
             btnHome.Name = "btnHome";
             btnHome.Size = new Size(140, 42);
-            btnHome.TabIndex = 5;
+            btnHome.TabIndex = 4;
             btnHome.Text = "На главную";
             btnHome.UseVisualStyleBackColor = false;
             btnHome.Click += btnHome_Click;
-            // 
-            // btnExportExcel
-            // 
-            btnExportExcel.BackColor = Color.FromArgb(40, 167, 69);
-            btnExportExcel.Cursor = Cursors.Hand;
-            btnExportExcel.FlatAppearance.BorderSize = 0;
-            btnExportExcel.FlatStyle = FlatStyle.Flat;
-            btnExportExcel.Font = new Font("Segoe UI", 10.5F);
-            btnExportExcel.ForeColor = Color.White;
-            btnExportExcel.Location = new Point(621, 19);
-            btnExportExcel.Name = "btnExportExcel";
-            btnExportExcel.Size = new Size(160, 42);
-            btnExportExcel.TabIndex = 4;
-            btnExportExcel.Text = "Экспорт в Excel";
-            btnExportExcel.UseVisualStyleBackColor = false;
-            btnExportExcel.Click += btnExportExcel_Click;
             // 
             // btnRefresh
             // 
@@ -281,6 +264,5 @@
         private Button btnDelete;
         private Button btnRefresh;
         private Button btnHome;
-        private Button btnExportExcel;
     }
 }
